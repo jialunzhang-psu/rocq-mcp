@@ -1,0 +1,7 @@
+#!/bin/sh
+if [ "$1" = "dep" ] && [ ! -e "$ROCQ_E2E_TIMEOUT_MARKER" ]; then
+  : > "$ROCQ_E2E_TIMEOUT_MARKER"
+  sleep 30
+  exit 0
+fi
+exec "$ROCQ_E2E_REAL_ROCQ" "$@"

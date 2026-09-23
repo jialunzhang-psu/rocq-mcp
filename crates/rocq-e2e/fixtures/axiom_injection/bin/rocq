@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+# Design note: baseline enumeration has already run when the engine asks for
+# the default load path with `rocq compile -where`. Mutate only the disposable
+# project then; native validation must see the newly introduced axiom.
+if [ "${1:-}" = compile ] && [ "${2:-}" = -where ] && [ -f "$ROCQ_E2E_AX_INJECT_MARKER" ]; then
+  rm "$ROCQ_E2E_AX_INJECT_MARKER"
+  if [ -f theories/Main.v ]; then target=theories/Main.v; else target=Main.v; fi
+  printf '%s\n' 'Axiom witness : True.' 'Theorem seed : True. Proof. exact I. Qed.' > "$target"
+fi
+exec "$ROCQ_E2E_REAL_ROCQ" "$@"

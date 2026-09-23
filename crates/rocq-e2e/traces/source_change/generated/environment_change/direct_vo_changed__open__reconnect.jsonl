@@ -1,0 +1,11 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_vo"}},"expected":{"declarations":[{"name":"Demo.Main.before_change","statement":"Theorem before_change : flag = true","status":"Open"},{"name":"Demo.Main.after_change","statement":"Theorem after_change : flag = true","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"before_change"}},"expected":{"theorem":"Demo.Main.before_change","statement":"Theorem before_change : flag = true","status":"Open","goals":"focused:\n  ============================\n  flag = true\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_vo"}},"expected":{"declarations":[{"name":"Demo.Main.before_change","statement":"Theorem before_change : flag = true","status":"Open"},{"name":"Demo.Main.after_change","statement":"Theorem after_change : flag = true","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"before_change"}},"expected":{"theorem":"Demo.Main.before_change","statement":"Theorem before_change : flag = true","status":"Open","goals":"focused:\n  ============================\n  flag = true\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"reflexivity."}},"expected":{"state":{"theorem":"Demo.Main.before_change","statement":"Theorem before_change : flag = true","status":"Open","goals":"focused:\n  ============================\n  flag = true\nunfocused:\nshelved:\ngiven_up:\n"},"error":{"kind":"proof_step_failed","message":"PET rejected request (-32003): Coq: Unable to unify \"true\" with \"flag\"."}}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

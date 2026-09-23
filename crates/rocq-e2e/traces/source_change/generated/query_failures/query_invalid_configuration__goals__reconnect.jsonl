@@ -1,0 +1,10 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals"}},"expected":{"kind":"invalid_configuration","message":"invalid PET request: _CoqProject load path is incomplete"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

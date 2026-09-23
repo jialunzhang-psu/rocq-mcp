@@ -1,0 +1,9 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_coq"}},"expected":{"declarations":[{"name":"Race.Main.seed","statement":"Theorem seed : True","status":"Completed"}]}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_coq"}},"expected":{"declarations":[{"name":"Race.Main.seed","statement":"Theorem seed : True","status":"Completed"}]}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh","statement":"True","kind":"Theorem"}},"expected":{"kind":"declaration_changed","message":"invalid PET request: declaration interface changed"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

@@ -1,0 +1,10 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"declarations":[{"name":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open"},{"name":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Demo.Main.answer","statement":"Definition answer : nat","status":"Completed"},{"name":"Demo.Main.duplicate","statement":"Theorem duplicate : True","status":"Open"},{"name":"Demo.Main.Nested.duplicate","statement":"Theorem duplicate : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"missing"}},"expected":{"kind":"not_found","message":"declaration 'missing' was not found"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"duplicate"}},"expected":{"kind":"ambiguous","message":"declaration name is ambiguous"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"open_true"}},"expected":{"theorem":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"state":{"theorem":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Completed","goals":""},"error":null}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"open_true"}},"expected":{"theorem":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Completed","goals":""}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

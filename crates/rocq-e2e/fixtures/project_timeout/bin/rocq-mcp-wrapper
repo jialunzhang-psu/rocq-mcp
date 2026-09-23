@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+count=0
+if [ -f "$ROCQ_E2E_SERVER_COUNT" ]; then count=$(cat "$ROCQ_E2E_SERVER_COUNT"); fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$ROCQ_E2E_SERVER_COUNT"
+if [ "$count" -eq 1 ]; then
+  mkdir -p project/_build/.rocq-engine
+  flock -x project/_build/.rocq-engine/project.lock -c "touch '$ROCQ_E2E_LOCK_READY'; sleep 22" &
+  printf '%s\n' "$!" > "$ROCQ_E2E_LOCK_PID"
+  while [ ! -e "$ROCQ_E2E_LOCK_READY" ]; do sleep 0.01; done
+elif [ "$count" -eq 2 ] && [ -f "$ROCQ_E2E_LOCK_PID" ]; then
+  kill "$(cat "$ROCQ_E2E_LOCK_PID")" 2>/dev/null || true
+  while kill -0 "$(cat "$ROCQ_E2E_LOCK_PID")" 2>/dev/null; do sleep 0.01; done
+fi
+exec "$ROCQ_E2E_REAL_MCP" "$@"

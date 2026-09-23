@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+if [ -z "${ROCQ_E2E_PET_SPAWN_COUNT:-}" ]; then
+  exec "$ROCQ_E2E_REAL_PET" "$@"
+fi
+if [ "${1:-}" = "--version" ]; then
+  exec "$ROCQ_E2E_REAL_PET" "$@"
+fi
+count=0
+if [ -f "$ROCQ_E2E_PET_SPAWN_COUNT" ]; then count=$(cat "$ROCQ_E2E_PET_SPAWN_COUNT"); fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$ROCQ_E2E_PET_SPAWN_COUNT"
+if [ $((count % 2)) -eq 1 ]; then exit 42; fi
+exec "$ROCQ_E2E_REAL_PET" "$@"

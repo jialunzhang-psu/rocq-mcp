@@ -1,0 +1,16 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"user_connect","user":"bob"}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_disconnect","user":"bob"}
+{"event":"user_connect","user":"alice"}
+{"event":"user_connect","user":"bob"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"user_project_a"}},"expected":{"declarations":[{"name":"ProjectA.Main.truth_a","statement":"Theorem truth_a : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth_a"}},"expected":{"theorem":"ProjectA.Main.truth_a","statement":"Theorem truth_a : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"bob","command":{"tool":"start","args":{"project_path":"user_project_b"}},"expected":{"declarations":[{"name":"ProjectB.Main.truth_b","statement":"Theorem truth_b : True","status":"Open"}]}}
+{"event":"command","user":"bob","command":{"tool":"prove","args":{"theorem":"truth_b"}},"expected":{"theorem":"ProjectB.Main.truth_b","statement":"Theorem truth_b : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"state":{"theorem":"ProjectA.Main.truth_a","statement":"Theorem truth_a : True","status":"Completed","goals":""},"error":null}}
+{"event":"command","user":"bob","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"state":{"theorem":"ProjectB.Main.truth_b","statement":"Theorem truth_b : True","status":"Completed","goals":""},"error":null}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_disconnect","user":"bob"}
+{"event":"server_kill"}

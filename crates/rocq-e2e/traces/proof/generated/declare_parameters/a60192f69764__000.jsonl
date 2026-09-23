@@ -1,0 +1,409 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_dune_project"}},"expected":{"declarations":[{"name":"MatrixDune.Main.truth","statement":"Theorem truth : True","status":"Open"},{"name":"MatrixDune.Main.pair","statement":"Theorem pair : True /\\ True","status":"Open"},{"name":"MatrixDune.Main.refl_nat","statement":"Theorem refl_nat : forall n : nat, n = n","status":"Open"},{"name":"MatrixDune.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"MatrixDune.Main.number","statement":"Definition number : nat","status":"Open"}]}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_dune_project"}},"expected":{"declarations":[{"name":"MatrixDune.Main.truth","statement":"Theorem truth : True","status":"Open"},{"name":"MatrixDune.Main.pair","statement":"Theorem pair : True /\\ True","status":"Open"},{"name":"MatrixDune.Main.refl_nat","statement":"Theorem refl_nat : forall n : nat, n = n","status":"Open"},{"name":"MatrixDune.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"MatrixDune.Main.number","statement":"Definition number : nat","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":null,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":0,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"statement":"True","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":null,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":0,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":null,"statement":"True","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":null,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":0,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":0,"statement":"True","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":null,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":0,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":null}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":0}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":""}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Axiom"}},"expected":{"kind":"invalid_request","message":"name must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"","statement":"True","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_7d2f5fc505b82555"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_c6cb4d9061db1973","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_26a10be3f902a047","kind":null}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_6e9dbc2b0b5dc97f","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_5fb5052623bfc419","kind":0}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_940f5368c6c038fa","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_e36ff1928bcca643","kind":""}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_d5f70c4b0c1d4903","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_6de4631ab3d9fa46","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_476a870ded1ab0b2","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_44745e38f0dbbd6c","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_61979fc6a14b1300","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_4fcd8b5d8c936056","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_7c6260c45ed62bf7","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_92b65a495a1d3526","kind":"Axiom"}},"expected":{"kind":"invalid_declaration","message":"unsupported declaration kind 'Axiom'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_4c34dce6bfb70087","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_6958ee0097832b61","statement":null}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_ea9b213a2752d5f1","statement":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_81cfe80a58061283","statement":null,"kind":null}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_e15237b309a99ab7","statement":null,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_74ee1b8805cbd5ff","statement":null,"kind":0}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_61f23f90323c9a85","statement":null,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_25c0cb7329e62b4c","statement":null,"kind":""}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_27208c21900023c9","statement":null,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_31c675a97f56a61a","statement":null,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_5e28bae025fdd560","statement":null,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_50a920c7d6cdb407","statement":null,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_38a449b3ce87ff12","statement":null,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_a393f3ebd5a80ded","statement":null,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_a802d8e21298bed2","statement":null,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_df3f35f15a4edc94","statement":null,"kind":"Axiom"}},"expected":{"kind":"invalid_declaration","message":"unsupported declaration kind 'Axiom'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_b38f75625ec8d36c","statement":null,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_32d0c16b306f7415","statement":0}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_1953234bae8aded6","statement":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_7e30397acf60a082","statement":0,"kind":null}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_3724dff60e9d2ee1","statement":0,"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_aea4d8bec139dd70","statement":0,"kind":0}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_c51eac0818d8b784","statement":0,"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_e365d3789d1bafca","statement":0,"kind":""}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_75bfce66fc31dd00","statement":0,"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_211eeb699cbad399","statement":0,"kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_00c3ff2d7254100c","statement":0,"kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_c5c4c1b655ce58f9","statement":0,"kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_c950b183e69fb1c6","statement":0,"kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_ba80becae9296d03","statement":0,"kind":"Definition"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_2a9b58d5e106571c","statement":0,"kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_672aad522628562c","statement":0,"kind":"Axiom"}},"expected":{"kind":"invalid_declaration","message":"unsupported declaration kind 'Axiom'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_7afe82a1cfb3c4d0","statement":0,"kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_410d39281b90f74b","statement":""}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_6043f0104b548a93","statement":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_2d9ecc4a3a3603af","statement":"","kind":null}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_ddef81f7d4dd9261","statement":"","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_62f309d88d8d9358","statement":"","kind":0}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_89f40996c8f01c28","statement":"","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_da31873403a6f908","statement":"","kind":""}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_7531485eb9c0f8e2","statement":"","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_be5aa9a369bdea1b","statement":"","kind":"Theorem"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_56886c82f92a9e90","statement":"","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_3ebe17b196bceb7d","statement":"","kind":"Lemma"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_aa6b80b72c87ce7a","statement":"","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_490e8657c450f27c","statement":"","kind":"Definition"}},"expected":{"kind":"invalid_request","message":"statement must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_10d55035218b4b1d","statement":"","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_c389819833df6c0b","statement":"","kind":"Axiom"}},"expected":{"kind":"invalid_declaration","message":"unsupported declaration kind 'Axiom'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_fe18ccc5f1513f16","statement":"","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_0f908ebfcf7941d6","statement":"True"}},"expected":{"theorem":"MatrixDune.Main.fresh_0f908ebfcf7941d6","statement":"Theorem fresh_0f908ebfcf7941d6 : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_787546ed9d8eb1f1","statement":"True","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_4904f5b5c7a85b8f","statement":"True","kind":null}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_99897d93cec1cc12","statement":"True","kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_8049ded007f36ec3","statement":"True","kind":0}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_e6aa484414706fbd","statement":"True","kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_446d1c178dcf7a7a","statement":"True","kind":""}},"expected":{"kind":"invalid_declaration","message":"declaration kind must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_d66ca903c783d8b7","statement":"True","kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_2e7660b5bcea12d6","statement":"True","kind":"Theorem"}},"expected":{"theorem":"MatrixDune.Main.fresh_2e7660b5bcea12d6","statement":"Theorem fresh_2e7660b5bcea12d6 : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_ff6da275cb8edbcd","statement":"True","kind":"Theorem","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_6dae137af33415f0","statement":"True","kind":"Lemma"}},"expected":{"theorem":"MatrixDune.Main.fresh_6dae137af33415f0","statement":"Lemma fresh_6dae137af33415f0 : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_7d2b22b40788950e","statement":"True","kind":"Lemma","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_09527317b3db184d","statement":"True","kind":"Definition"}},"expected":{"theorem":"MatrixDune.Main.fresh_09527317b3db184d","statement":"Definition fresh_09527317b3db184d : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_ceaecfcaa9ad7521","statement":"True","kind":"Definition","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_767f2a827111fb4d","statement":"True","kind":"Axiom"}},"expected":{"kind":"invalid_declaration","message":"unsupported declaration kind 'Axiom'"}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh_2ea1a5ae6068aafa","statement":"True","kind":"Axiom","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

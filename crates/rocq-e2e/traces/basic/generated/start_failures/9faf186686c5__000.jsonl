@@ -1,0 +1,11 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"ambiguous_project"}},"expected":{"kind":"ambiguous","message":"project layout is ambiguous"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"declarations":[{"name":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open"},{"name":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Demo.Main.answer","statement":"Definition answer : nat","status":"Completed"},{"name":"Demo.Main.duplicate","statement":"Theorem duplicate : True","status":"Open"},{"name":"Demo.Main.Nested.duplicate","statement":"Theorem duplicate : True","status":"Open"}]}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"kind":"ambiguous","message":"project layout is ambiguous"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

@@ -1,0 +1,14 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_axiom"}},"expected":{"declarations":[{"name":"Demo.Main.witness","statement":"Definition witness : True := I","status":"Completed"},{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact witness."}},"expected":{"state":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Pending","goals":"focused:\nunfocused:\nshelved:\ngiven_up:\n"},"error":{"kind":"build_timeout","message":"dependency analysis timed out"}}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_axiom"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Pending"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"kind":"axiom_dependency_out_of_scope","message":"axiom dependency is outside the authorized baseline: witness"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_axiom"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Rejected"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Rejected","goals":""}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

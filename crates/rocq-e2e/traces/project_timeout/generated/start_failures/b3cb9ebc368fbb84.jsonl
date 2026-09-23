@@ -1,0 +1,9 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"kind":"project_timeout","message":"timed out waiting for exclusive project ownership"}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

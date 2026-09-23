@@ -1,0 +1,10 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_vo_transitive"}},"expected":{"declarations":[{"name":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"uses_derived"}},"expected":{"theorem":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Open","goals":"focused:\n  ============================\n  derived = true\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_vo_transitive"}},"expected":{"declarations":[{"name":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"uses_derived"}},"expected":{"kind":"proof_step_failed","message":"PET rejected request (-32006): Theorem_not_found: [find_thm] Theorem found but failed with Coq error:\n The reference derived was not found in the current environment.!"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

@@ -1,0 +1,15 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"prove_project"}},"expected":{"declarations":[{"name":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open"},{"name":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Demo.Main.answer","statement":"Definition answer : nat","status":"Completed"},{"name":"Demo.Main.duplicate","statement":"Theorem duplicate : True","status":"Open"},{"name":"Demo.Main.Nested.duplicate","statement":"Theorem duplicate : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"open_true"}},"expected":{"theorem":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"done_true"}},"expected":{"theorem":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed","goals":""}}
+{"event":"user_connect","user":"bob"}
+{"event":"command","user":"bob","command":{"tool":"start","args":{"project_path":"other_project"}},"expected":{"declarations":[{"name":"EvictB.Main.truth_b","statement":"Theorem truth_b : True","status":"Open"}]}}
+{"event":"command","user":"bob","command":{"tool":"prove","args":{"theorem":"truth_b"}},"expected":{"theorem":"EvictB.Main.truth_b","statement":"Theorem truth_b : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":null}},"expected":{"kind":"invalid_request","message":"theorem must be a non-empty string"}}
+{"event":"user_disconnect","user":"bob"}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

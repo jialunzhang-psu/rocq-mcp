@@ -1,0 +1,23 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"user_connect","user":"bob"}
+{"event":"user_connect","user":"carol"}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_disconnect","user":"bob"}
+{"event":"user_disconnect","user":"carol"}
+{"event":"user_connect","user":"alice"}
+{"event":"user_connect","user":"bob"}
+{"event":"user_connect","user":"carol"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"user_files_project"}},"expected":{"declarations":[{"name":"Files.A.a","statement":"Theorem a : True","status":"Open"},{"name":"Files.B.b","statement":"Theorem b : True","status":"Open"},{"name":"Files.C.c","statement":"Theorem c : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"a"}},"expected":{"theorem":"Files.A.a","statement":"Theorem a : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"bob","command":{"tool":"start","args":{"project_path":"user_files_project"}},"expected":{"declarations":[{"name":"Files.A.a","statement":"Theorem a : True","status":"Open"},{"name":"Files.B.b","statement":"Theorem b : True","status":"Open"},{"name":"Files.C.c","statement":"Theorem c : True","status":"Open"}]}}
+{"event":"command","user":"bob","command":{"tool":"prove","args":{"theorem":"b"}},"expected":{"theorem":"Files.B.b","statement":"Theorem b : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"carol","command":{"tool":"start","args":{"project_path":"user_files_project"}},"expected":{"declarations":[{"name":"Files.A.a","statement":"Theorem a : True","status":"Open"},{"name":"Files.B.b","statement":"Theorem b : True","status":"Open"},{"name":"Files.C.c","statement":"Theorem c : True","status":"Open"}]}}
+{"event":"command","user":"carol","command":{"tool":"prove","args":{"theorem":"c"}},"expected":{"theorem":"Files.C.c","statement":"Theorem c : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"state":{"theorem":"Files.A.a","statement":"Theorem a : True","status":"Completed","goals":""},"error":null}}
+{"event":"command","user":"bob","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"state":{"theorem":"Files.B.b","statement":"Theorem b : True","status":"Completed","goals":""},"error":null}}
+{"event":"command","user":"carol","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"state":{"theorem":"Files.C.c","statement":"Theorem c : True","status":"Completed","goals":""},"error":null}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_disconnect","user":"bob"}
+{"event":"user_disconnect","user":"carol"}
+{"event":"server_kill"}

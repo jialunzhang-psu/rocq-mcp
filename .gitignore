@@ -1,0 +1,14 @@
+/target/
+/.state/
+**/_build/
+*.sqlite3*
+*.vo
+*.vos
+*.vok
+*.glob
+*.aux
+*.log
+/.env
+/.env.*
+**/__pycache__/
+*.py[cod]

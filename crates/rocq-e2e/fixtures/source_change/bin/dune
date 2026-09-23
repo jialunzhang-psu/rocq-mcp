@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+if [ -e "${ROCQ_E2E_DUNE_ARM_MARKER:-/nonexistent}" ] && [ "${1:-}" = build ] && [ ! -e "$ROCQ_E2E_TIMEOUT_MARKER" ]; then
+  : > "$ROCQ_E2E_TIMEOUT_MARKER"
+  sleep 30
+  exit 0
+fi
+exec "$ROCQ_E2E_REAL_DUNE" "$@"

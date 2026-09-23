@@ -1,0 +1,11 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_dune"}},"expected":{"declarations":[{"name":"DeclChangeDune.A.t","statement":"Theorem t : True","status":"Open"},{"name":"DeclChangeDune.B.l","statement":"Lemma l : True","status":"Open"},{"name":"DeclChangeDune.C.d","statement":"Definition d : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"t"}},"expected":{"theorem":"DeclChangeDune.A.t","statement":"Theorem t : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"kind":"declaration_changed","message":"invalid PET request: declaration interface changed"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"l"}},"expected":{"theorem":"DeclChangeDune.B.l","statement":"Lemma l : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"kind":"declaration_changed","message":"invalid PET request: declaration interface changed"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"d"}},"expected":{"theorem":"DeclChangeDune.C.d","statement":"Definition d : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"kind":"declaration_changed","message":"invalid PET request: declaration interface changed"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

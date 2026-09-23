@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+count=0
+if [ -f "$ROCQ_E2E_SERVER_COUNT" ]; then count=$(cat "$ROCQ_E2E_SERVER_COUNT"); fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$ROCQ_E2E_SERVER_COUNT"
+if [ "$count" -ge 2 ]; then
+  touch "$ROCQ_E2E_TOOLCHAIN_READY"
+  if [ ! -f "$ROCQ_E2E_TOOLCHAIN_CHANGED" ]; then
+    case "${ROCQ_E2E_CHANGE:-}" in
+      rocq_identity_changed) printf '%s\n' '# Rocq identity changed between processes' >> bin/rocq ;;
+      pet_identity_changed) printf '%s\n' '# PET identity changed between processes' >> bin/pet ;;
+    esac
+    touch "$ROCQ_E2E_TOOLCHAIN_CHANGED"
+  fi
+fi
+exec "$ROCQ_E2E_REAL_MCP" "$@"

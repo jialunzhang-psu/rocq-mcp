@@ -1,0 +1,10 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_coq"}},"expected":{"declarations":[{"name":"Demo.A.a","statement":"Theorem a : True","status":"Completed"},{"name":"Demo.B.b","statement":"Theorem b : True","status":"Completed"}]}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_coq"}},"expected":{"declarations":[{"name":"Demo.A.a","statement":"Theorem a : True","status":"Completed"},{"name":"Demo.B.b","statement":"Theorem b : True","status":"Completed"}]}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"library":"Demo.New","name":"truth","statement":"True"}},"expected":{"kind":"ambiguous","message":"new logical library has ambiguous load paths"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

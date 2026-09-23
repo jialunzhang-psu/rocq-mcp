@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+if [ "${ROCQ_E2E_ENABLE_BUILD_TIMEOUT:-0}" = 1 ] && [ "${1:-}" = dep ] && [ ! -e "$ROCQ_E2E_TIMEOUT_MARKER" ]; then
+  : > "$ROCQ_E2E_TIMEOUT_MARKER"
+  sleep 30
+  exit 0
+fi
+exec "$ROCQ_E2E_REAL_ROCQ" "$@"

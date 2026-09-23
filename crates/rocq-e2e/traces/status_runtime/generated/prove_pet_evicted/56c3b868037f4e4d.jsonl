@@ -1,0 +1,16 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"bob"}
+{"event":"command","user":"bob","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"declarations":[{"name":"Rejected.Main.unfinished","statement":"Theorem unfinished : True","status":"Open"},{"name":"Rejected.Main.rejected_theorem","statement":"Theorem rejected_theorem : True","status":"Open"},{"name":"Rejected.Main.rejected_lemma","statement":"Lemma rejected_lemma : True","status":"Open"},{"name":"Rejected.Main.rejected_definition","statement":"Definition rejected_definition : True","status":"Open"},{"name":"Rejected.Main.open_anchor","statement":"Theorem open_anchor : True","status":"Open"},{"name":"Rejected.Main.done_true","statement":"Theorem done_true : True","status":"Completed"}]}}
+{"event":"command","user":"bob","command":{"tool":"prove","args":{"theorem":"rejected_theorem"}},"expected":{"theorem":"Rejected.Main.rejected_theorem","statement":"Theorem rejected_theorem : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"bob","command":{"tool":"check","args":{"commands":"exact unfinished."}},"expected":{"state":{"theorem":"Rejected.Main.rejected_theorem","statement":"Theorem rejected_theorem : True","status":"Rejected","goals":"focused:\nunfocused:\nshelved:\ngiven_up:\n"},"error":{"kind":"unfinished_dependency","message":"proof depends on unfinished local declaration 'unfinished'"}}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"declarations":[{"name":"Rejected.Main.unfinished","statement":"Theorem unfinished : True","status":"Open"},{"name":"Rejected.Main.rejected_theorem","statement":"Theorem rejected_theorem : True","status":"Rejected"},{"name":"Rejected.Main.rejected_lemma","statement":"Lemma rejected_lemma : True","status":"Open"},{"name":"Rejected.Main.rejected_definition","statement":"Definition rejected_definition : True","status":"Open"},{"name":"Rejected.Main.open_anchor","statement":"Theorem open_anchor : True","status":"Open"},{"name":"Rejected.Main.done_true","statement":"Theorem done_true : True","status":"Completed"}]}}
+{"event":"user_connect","user":"carol"}
+{"event":"command","user":"carol","command":{"tool":"start","args":{"project_path":"other_project"}},"expected":{"declarations":[{"name":"RuntimeC.Main.truth_c","statement":"Theorem truth_c : True","status":"Open"}]}}
+{"event":"command","user":"carol","command":{"tool":"prove","args":{"theorem":"truth_c"}},"expected":{"theorem":"RuntimeC.Main.truth_c","statement":"Theorem truth_c : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"rejected_theorem"}},"expected":{"theorem":"Rejected.Main.rejected_theorem","statement":"Theorem rejected_theorem : True","status":"Rejected","goals":""}}
+{"event":"user_disconnect","user":"carol"}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

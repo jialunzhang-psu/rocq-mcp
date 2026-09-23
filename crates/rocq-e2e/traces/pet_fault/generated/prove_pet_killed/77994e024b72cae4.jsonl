@@ -1,0 +1,12 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"prove_project"}},"expected":{"declarations":[{"name":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open"},{"name":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Demo.Main.answer","statement":"Definition answer : nat","status":"Completed"},{"name":"Demo.Main.duplicate","statement":"Theorem duplicate : True","status":"Open"},{"name":"Demo.Main.Nested.duplicate","statement":"Theorem duplicate : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"done_true"}},"expected":{"theorem":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed","goals":""}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"prove_project"}},"expected":{"declarations":[{"name":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open"},{"name":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Demo.Main.answer","statement":"Definition answer : nat","status":"Completed"},{"name":"Demo.Main.duplicate","statement":"Theorem duplicate : True","status":"Open"},{"name":"Demo.Main.Nested.duplicate","statement":"Theorem duplicate : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"done_true"}},"expected":{"theorem":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed","goals":""}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

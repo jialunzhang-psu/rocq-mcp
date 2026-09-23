@@ -1,0 +1,13 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"state":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Pending","goals":"focused:\nunfocused:\nshelved:\ngiven_up:\n"},"error":{"kind":"build_timeout","message":"dependency analysis timed out"}}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config"}},"expected":{"kind":"invalid_configuration","message":"_CoqProject load path is incomplete"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Pending"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Completed","goals":""}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

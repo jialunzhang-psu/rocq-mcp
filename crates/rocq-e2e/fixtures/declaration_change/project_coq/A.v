@@ -1,0 +1,1 @@
+Theorem t : True. Admitted.

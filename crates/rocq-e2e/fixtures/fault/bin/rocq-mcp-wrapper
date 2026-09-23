@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+count_file="${ROCQ_E2E_FAULT_START_COUNT:?}"
+if [[ -e "$count_file" ]]; then
+  exec "${ROCQ_E2E_REAL_MCP:?}" "$@"
+fi
+printf '1\n' > "$count_file"
+export ROCQ_ENGINE_FAULT_POINT="${ROCQ_E2E_FAULT_POINT:?}"
+exec "${ROCQ_E2E_REAL_MCP:?}" "$@"

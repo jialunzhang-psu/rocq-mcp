@@ -1,0 +1,14 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":null}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":0}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":""}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"dune_project"}},"expected":{"declarations":[{"name":"DuneDemo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"dune_project","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

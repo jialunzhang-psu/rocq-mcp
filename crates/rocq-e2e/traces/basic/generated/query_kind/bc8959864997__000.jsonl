@@ -1,0 +1,54 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"query","args":{}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":null}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":null,"extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":0}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":0,"extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":""}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"unknown"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"unknown","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"whitespace"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"whitespace","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"search"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"search","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"statement"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"statement","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"proof"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"proof","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"definition"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"definition","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"assumptions"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"assumptions","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"dependencies"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"dependencies","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"type"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"type","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"notations"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"notations","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"GOALS"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"GOALS","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"SEARCH"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"SEARCH","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"STATEMENT"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"STATEMENT","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"PROOF"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"PROOF","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"DEFINITION"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"DEFINITION","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"ASSUMPTIONS"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"ASSUMPTIONS","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"DEPENDENCIES"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"DEPENDENCIES","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"TYPE"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"TYPE","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"NOTATIONS"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"NOTATIONS","extra":true}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

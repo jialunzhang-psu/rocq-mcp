@@ -1,0 +1,8 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"bad-name","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

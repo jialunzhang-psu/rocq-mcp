@@ -1,0 +1,13 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_vo_transitive"}},"expected":{"declarations":[{"name":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"uses_derived"}},"expected":{"theorem":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Open","goals":"focused:\n  ============================\n  derived = true\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"reflexivity."}},"expected":{"state":{"theorem":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Pending","goals":"focused:\nunfocused:\nshelved:\ngiven_up:\n"},"error":{"kind":"build_timeout","message":"dependency analysis timed out"}}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_vo_transitive"}},"expected":{"declarations":[{"name":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Pending"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"uses_derived"}},"expected":{"theorem":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Pending","goals":""}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_vo_transitive"}},"expected":{"declarations":[{"name":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Rejected"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"uses_derived"}},"expected":{"theorem":"Demo.Main.uses_derived","statement":"Theorem uses_derived : derived = true","status":"Rejected","goals":""}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

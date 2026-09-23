@@ -1,0 +1,15 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_single"}},"expected":{"declarations":[{"name":"Demo.Main.seed","statement":"Theorem seed : True","status":"Completed"}]}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"truth","statement":"True"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"$transport":"lost"}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_single"}},"expected":{"declarations":[{"name":"Demo.Main.seed","statement":"Theorem seed : True","status":"Completed"},{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Completed"}]}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_single"}},"expected":{"declarations":[{"name":"Demo.Main.seed","statement":"Theorem seed : True","status":"Completed"},{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Completed"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Completed","goals":""}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

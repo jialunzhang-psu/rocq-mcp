@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/trace-forest", "crates/rocq-engine", "crates/rocq-mcp", "crates/rocq-e2e"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+trace-forest = { path = "crates/trace-forest" }
+rocq-engine = { path = "crates/rocq-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+tempfile = "3"
+walkdir = "2"
+fs2 = "0.4"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+rmcp = { version = "=3.4.0", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+tokio-util = { version = "0.7", features = ["io"] }
+zstd = "0.13"
+
+[profile.dev]
+debug = 1

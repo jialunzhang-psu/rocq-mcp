@@ -1,0 +1,21 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"declarations":[{"name":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open"},{"name":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Demo.Main.answer","statement":"Definition answer : nat","status":"Completed"},{"name":"Demo.Main.duplicate","statement":"Theorem duplicate : True","status":"Open"},{"name":"Demo.Main.Nested.duplicate","statement":"Theorem duplicate : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"open_true"}},"expected":{"theorem":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project"}},"expected":{"declarations":[{"name":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open"},{"name":"Demo.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Demo.Main.answer","statement":"Definition answer : nat","status":"Completed"},{"name":"Demo.Main.duplicate","statement":"Theorem duplicate : True","status":"Open"},{"name":"Demo.Main.Nested.duplicate","statement":"Theorem duplicate : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"open_true"}},"expected":{"theorem":"Demo.Main.open_true","statement":"Theorem open_true : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":null}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":null,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":0}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":0,"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":""}},"expected":{"kind":"invalid_request","message":"project_path must be a non-empty string"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"dune_project"}},"expected":{"declarations":[{"name":"DuneDemo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"dune_project","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

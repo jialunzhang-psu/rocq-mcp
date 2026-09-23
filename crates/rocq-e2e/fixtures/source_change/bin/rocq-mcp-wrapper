@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+count=0
+if [ -f "$ROCQ_E2E_SERVER_COUNT" ]; then count=$(cat "$ROCQ_E2E_SERVER_COUNT"); fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$ROCQ_E2E_SERVER_COUNT"
+change=${ROCQ_E2E_CHANGE:-}
+
+if [ "$change" = source_same_mtime_late ] && [ "${1:-}" = --mutate-only ]; then
+  printf '%s\n' 'Theorem truth : False. Admitted.' > project_content/Main.v
+  touch -r project_content/Main.v.mtime project_content/Main.v
+  exit 0
+fi
+
+# Design note: mutate exactly one environment axis per disposable trace.
+# Compiling every external library in every case caused a process storm.
+if [ "$count" -eq 1 ]; then
+  case "$change" in
+    plugin_vo_changed)
+      printf '%s\n' 'Definition plugin_flag : bool := true.' > project_plugin/plugin/Lib.v
+      (cd project_plugin/plugin && rocq compile -Q . Plugin Lib.v >/dev/null)
+      rm project_plugin/plugin/Lib.v project_plugin/plugin/Lib.glob ;;
+    direct_vo_changed)
+      printf '%s\n' 'Definition flag : bool := true.' > project_vo/Lib.v
+      (cd project_vo && rocq compile -Q . Demo Lib.v >/dev/null)
+      rm project_vo/Lib.v project_vo/Lib.glob ;;
+    direct_vo_deleted)
+      printf '%s\n' 'Definition flag : bool := true.' > project_vo_delete/Lib.v
+      (cd project_vo_delete && rocq compile -Q . Demo Lib.v >/dev/null)
+      rm project_vo_delete/Lib.v project_vo_delete/Lib.glob ;;
+    transitive_vo_changed)
+      printf '%s\n' 'Definition flag : bool := true.' > project_vo_transitive/Base.v
+      printf '%s\n' 'From Demo Require Import Base. Definition derived := flag.' > project_vo_transitive/Mid.v
+      (cd project_vo_transitive && rocq compile -Q . Demo Base.v >/dev/null && rocq compile -Q . Demo Mid.v >/dev/null)
+      rm project_vo_transitive/Base.v project_vo_transitive/Base.glob project_vo_transitive/Mid.v project_vo_transitive/Mid.glob ;;
+  esac
+elif [ "$count" -eq 2 ]; then
+  case "$change" in
+    source_same_mtime)
+      printf '%s\n' 'Theorem truth : False. Admitted.' > project_content/Main.v
+      touch -r project_content/Main.v.mtime project_content/Main.v ;;
+    source_added)
+      printf '%s\n' 'Theorem extra : True. Admitted.' > project_add/Extra.v ;;
+    source_deleted)
+      mv project_delete/Main.v project_delete/Main.v.saved ;;
+    source_restored)
+      mv project_restore/Main.v project_restore/Main.v.saved ;;
+    dune_modules)
+      printf '%s\n' 'Theorem extra : True. Admitted.' > project_dune/theories/Extra.v
+      printf '%s\n' '(rocq.theory (name Demo) (modules Main Extra))' > project_dune/theories/dune ;;
+    load_path)
+      printf '%s\n' '-Q . Changed' > project_loadpath/_CoqProject ;;
+    configuration_changed)
+      printf '%s\n' '-Q' > project_config/_CoqProject ;;
+    axiom_after_baseline)
+      printf '%s\n' 'Axiom witness : True.' 'Theorem truth : True. Admitted.' > project_axiom/Main.v ;;
+    plugin_vo_changed)
+      printf '%s\n' 'Definition plugin_flag : bool := false.' > project_plugin/plugin/Lib.v
+      (cd project_plugin/plugin && rocq compile -Q . Plugin Lib.v >/dev/null)
+      rm project_plugin/plugin/Lib.v project_plugin/plugin/Lib.glob ;;
+    direct_vo_changed)
+      printf '%s\n' 'Definition flag : bool := false.' > project_vo/Lib.v
+      (cd project_vo && rocq compile -Q . Demo Lib.v >/dev/null)
+      rm project_vo/Lib.v project_vo/Lib.glob ;;
+    direct_vo_deleted)
+      rm project_vo_delete/Lib.vo ;;
+    transitive_vo_changed)
+      printf '%s\n' 'Definition flag : bool := false.' > project_vo_transitive/Base.v
+      (cd project_vo_transitive && rocq compile -Q . Demo Base.v >/dev/null)
+      rm project_vo_transitive/Base.v project_vo_transitive/Base.glob ;;
+  esac
+elif [ "$count" -eq 3 ] && [ "$change" = source_restored ]; then
+  mv project_restore/Main.v.saved project_restore/Main.v
+fi
+if [ "${1:-}" = --mutate-only ]; then exit 0; fi
+exec "$ROCQ_E2E_REAL_MCP" "$@"

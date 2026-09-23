@@ -1,0 +1,21 @@
+[package]
+name = "rocq-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Test-only publication crash windows. Never enabled by production builds.
+fault-injection = ["rocq-engine/fault-injection"]
+
+[dependencies]
+rocq-engine.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rocq-e2e = { path = "../rocq-e2e" }

@@ -1,0 +1,10 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config_dune"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config_dune"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"publication_2c366a6acd92e4b4","kind":"Theorem","statement":"True"}},"expected":{"theorem":"Demo.Main.publication_2c366a6acd92e4b4","statement":"Theorem publication_2c366a6acd92e4b4 : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"kind":"invalid_configuration","message":"invalid PET request: unterminated project expression"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}
