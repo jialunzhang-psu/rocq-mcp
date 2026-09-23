@@ -8,6 +8,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
+    process::Command,
 };
 use walkdir::WalkDir;
 
@@ -16,61 +17,82 @@ pub(crate) struct Layout {
     by_library: BTreeMap<LogicalLibrary, PathBuf>,
     by_file: BTreeMap<PathBuf, LogicalLibrary>,
     mappings: Vec<(PathBuf, LogicalLibrary)>,
-    explicit_dune_modules: bool,
+    dune_project: bool,
 }
 
 impl Layout {
-    /// Builds a fail-closed logical layout from `_CoqProject` `-Q`/`-R` flags.
-    /// `-I` is parsed for validity but does not define compilation-unit names.
+    /// Builds a fail-closed logical layout. Dune projects use Dune's selected
+    /// Rocq rules; other projects use `_CoqProject` load paths or the root.
+    /// Owned paths are excluded; invalid mappings and unavailable inputs fail.
     pub(crate) fn load(root: &Path, owned_paths: &[PathBuf]) -> Result<Self> {
-        let mappings = coqproject_mappings(root)?;
-        let mappings = if mappings.is_empty() {
-            let dune = dune_mappings(root)?;
-            if !dune.is_empty() {
-                dune
-            } else {
-                // Design note: a project without explicit mappings has the sole
-                // conventional root mapping, rather than guessing from filenames.
-                vec![(root.to_owned(), LogicalLibrary(Vec::new()))]
-            }
+        let dune = dune_sources(root)?;
+        let mappings = if let Some((_, mappings)) = &dune {
+            mappings.clone()
         } else {
-            mappings
+            let mappings = coqproject_mappings(root)?;
+            if mappings.is_empty() {
+                vec![(root.to_owned(), LogicalLibrary(Vec::new()))]
+            } else {
+                mappings
+            }
         };
         let mut by_library = BTreeMap::new();
         let mut by_file = BTreeMap::new();
         let mapping_roots = mappings.clone();
-        let dune_modules = dune_modules(root)?;
         for (directory, prefix) in mappings {
-            for entry in WalkDir::new(&directory).follow_links(false) {
-                let entry = entry.map_err(|_| {
-                    Error::new(
-                        ErrorKind::InvalidConfiguration,
-                        "project layout traversal failed",
-                    )
-                })?;
-                let path = entry.path();
-                if ignored_tree(path, root) {
-                    continue;
+            let paths = if let Some((sources, _)) = &dune {
+                sources
+                    .iter()
+                    .filter(|(path, mapping)| path.starts_with(&directory) && mapping == &prefix)
+                    .map(|(path, _)| path.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                let mut paths = Vec::new();
+                for entry in WalkDir::new(&directory).follow_links(false) {
+                    let entry = entry.map_err(|_| {
+                        Error::new(
+                            ErrorKind::InvalidConfiguration,
+                            "project layout traversal failed",
+                        )
+                    })?;
+                    let path = entry.path();
+                    if entry.file_type().is_symlink() {
+                        continue;
+                    }
+                    if !entry.file_type().is_file() || path.extension().is_none_or(|x| x != "v") {
+                        continue;
+                    }
+                    // A non-Dune source must have a representable logical
+                    // name; metadata directories with punctuation cannot.
+                    let relative = path.strip_prefix(&directory).map_err(|_| {
+                        Error::new(ErrorKind::InvalidConfiguration, "source escapes mapping")
+                    })?;
+                    let mut parts = relative.components().peekable();
+                    let mut invalid = false;
+                    while let Some(part) = parts.next() {
+                        let Component::Normal(name) = part else {
+                            invalid = true;
+                            break;
+                        };
+                        let value = if parts.peek().is_none() {
+                            Path::new(name).file_stem().and_then(|stem| stem.to_str())
+                        } else {
+                            name.to_str()
+                        };
+                        invalid |= value.is_none_or(|value| validate_component(value).is_err());
+                    }
+                    if invalid {
+                        continue;
+                    }
+                    paths.push(path.to_owned());
                 }
+                paths
+            };
+            for path in paths {
                 if owned_paths.iter().any(|owned| path.starts_with(owned)) {
                     continue;
                 }
-                if entry.file_type().is_symlink() {
-                    continue;
-                }
-                if !entry.file_type().is_file() || path.extension().is_none_or(|x| x != "v") {
-                    continue;
-                }
-                if let Some(modules) = dune_modules.get(&directory)
-                    && !modules.is_empty()
-                    && !path
-                        .file_stem()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(|stem| modules.iter().any(|module| module == stem))
-                {
-                    continue;
-                }
-                let canonical = fs::canonicalize(path).map_err(|_| {
+                let canonical = fs::canonicalize(&path).map_err(|_| {
                     Error::new(
                         ErrorKind::InvalidConfiguration,
                         "project source is unavailable",
@@ -130,25 +152,19 @@ impl Layout {
                 }
             }
         }
-        let explicit_dune_modules =
-            fs::read_to_string(root.join("dune"))
-                .ok()
-                .is_some_and(|source| {
-                    source
-                        .split(|x: char| x.is_whitespace() || matches!(x, '(' | ')'))
-                        .any(|token| token == "modules")
-                });
         Ok(Self {
             by_library,
             by_file,
             mappings: mapping_roots,
-            explicit_dune_modules,
+            dune_project: dune.is_some(),
         })
     }
 
-    pub(crate) fn target(&self, library: &LogicalLibrary) -> Result<(PathBuf, bool)> {
+    /// Resolves an existing compilation unit or the unique reversible path
+    /// for a new one. Ambiguous and unmapped logical names fail closed.
+    pub(crate) fn target(&self, library: &LogicalLibrary) -> Result<PathBuf> {
         if let Some(file) = self.by_library.get(library) {
-            return Ok((file.clone(), self.explicit_dune_modules));
+            return Ok(file.clone());
         }
         let mut candidates = self
             .mappings
@@ -177,7 +193,7 @@ impl Layout {
                 "new logical library has ambiguous load paths",
             ));
         }
-        Ok((target, self.explicit_dune_modules))
+        Ok(target)
     }
 
     pub(crate) fn library(&self, file: &Path) -> Result<&LogicalLibrary> {
@@ -192,125 +208,256 @@ impl Layout {
     pub(crate) fn files(&self) -> Vec<PathBuf> {
         self.by_file.keys().cloned().collect()
     }
+
+    pub(crate) fn is_dune_project(&self) -> bool {
+        self.dune_project
+    }
 }
 
-/// Reads the supported `rocq.theory` Dune name form without treating arbitrary
-/// Dune stanzas as source layout. Explicit `modules` remain an I2c update plan;
-/// this tranche never edits Dune during declaration creation.
-fn dune_mappings(root: &Path) -> Result<Vec<(PathBuf, LogicalLibrary)>> {
-    let mut out = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false) {
-        let entry = entry
-            .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "Dune traversal failed"))?;
-        if ignored_tree(entry.path(), root)
-            || !entry.file_type().is_file()
-            || entry.file_name() != "dune"
-        {
-            continue;
-        }
-        let source = fs::read_to_string(entry.path()).map_err(|_| {
+/// Returns Dune's build directory for a workspace, if one owns this path.
+/// Errors on an unusable Dune installation or malformed workspace response.
+pub(crate) fn dune_workspace_root(root: &Path) -> Option<&Path> {
+    root.ancestors()
+        .find(|dir| dir.join("dune-project").is_file())
+}
+
+pub(crate) fn dune_build_directory(root: &Path) -> Result<Option<PathBuf>> {
+    let Some(workspace) = dune_workspace_root(root) else {
+        return Ok(None);
+    };
+    let output = Command::new("dune")
+        .current_dir(workspace)
+        .args(["describe", "workspace", "--format", "sexp", "--lang", "0.1"])
+        .output()
+        .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "Dune is unavailable"))?;
+    if !output.status.success() {
+        return Err(Error::new(
+            ErrorKind::InvalidConfiguration,
+            "Dune workspace discovery failed",
+        ));
+    }
+    let description = String::from_utf8(output.stdout).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidConfiguration,
+            "Dune workspace is not UTF-8",
+        )
+    })?;
+    let tokens = sexp_tokens(&description)?;
+    let directory = tokens
+        .windows(2)
+        .find_map(|pair| (pair[0] == "build_context").then(|| workspace.join(&pair[1])))
+        .ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidConfiguration,
-                "Dune configuration is unavailable",
+                "Dune build context unavailable",
             )
         })?;
-        let tokens = sexp_tokens(&source)?;
-        let mut index = 0;
-        while index + 1 < tokens.len() {
-            if tokens[index] != "(" || tokens[index + 1] != "rocq.theory" {
-                index += 1;
-                continue;
-            }
-            let mut depth = 1;
-            let mut end = index + 2;
-            while end < tokens.len() && depth > 0 {
-                if tokens[end] == "(" {
-                    depth += 1;
-                } else if tokens[end] == ")" {
-                    depth -= 1;
-                }
-                end += 1;
-            }
-            if depth != 0 {
-                return Err(Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "unterminated rocq.theory stanza",
-                ));
-            }
-            let stanza = &tokens[index + 2..end - 1];
-            let name = stanza
-                .windows(2)
-                .find_map(|pair| (pair[0] == "name").then(|| pair[1].clone()))
-                .ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidConfiguration, "rocq.theory has no name")
-                })?;
-            let parts = name.split('.').map(str::to_owned).collect::<Vec<_>>();
-            if parts.iter().any(|part| validate_component(part).is_err()) {
-                return Err(Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "rocq.theory name is invalid",
-                ));
-            }
-            if let Some(parent) = entry.path().parent() {
-                out.push((parent.to_owned(), LogicalLibrary(parts)));
-            }
-            index = end;
-        }
-    }
-    Ok(out)
+    Ok(Some(directory))
 }
 
-/// Explicit Dune modules are local to the directory owning the rocq.theory
-/// stanza; they are never treated as a root-wide filter.
-fn dune_modules(root: &Path) -> Result<BTreeMap<PathBuf, Vec<String>>> {
-    let mut out = BTreeMap::new();
-    for entry in WalkDir::new(root).follow_links(false) {
-        let entry = entry
-            .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "Dune traversal failed"))?;
-        if ignored_tree(entry.path(), root)
-            || !entry.file_type().is_file()
-            || entry.file_name() != "dune"
-        {
-            continue;
-        }
-        let tokens = sexp_tokens(&fs::read_to_string(entry.path()).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidConfiguration,
-                "Dune configuration is unavailable",
-            )
-        })?)?;
-        let mut index = 0;
-        while index + 1 < tokens.len() {
-            if tokens[index] != "(" || tokens[index + 1] != "rocq.theory" {
-                index += 1;
-                continue;
-            }
-            let mut depth = 1;
-            let mut end = index + 2;
-            while end < tokens.len() && depth > 0 {
-                if tokens[end] == "(" {
-                    depth += 1;
-                } else if tokens[end] == ")" {
-                    depth -= 1;
-                }
-                end += 1;
-            }
-            let stanza = &tokens[index + 2..end.saturating_sub(1)];
-            if let Some(position) = stanza.iter().position(|token| token == "modules") {
-                let modules = stanza[position + 1..]
-                    .iter()
-                    .take_while(|token| *token != "name" && *token != "libraries")
-                    .filter(|token| *token != "(")
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if let Some(parent) = entry.path().parent() {
-                    out.insert(parent.to_owned(), modules);
-                }
-            }
-            index = end;
-        }
+/// Ask Dune for the Rocq compilation rules it actually selected. The source
+/// and logical prefix come from the same compiler action, so excluded trees,
+/// generated targets, and `(modules ...)` need no separate scanner policy.
+/// Returns `None` outside a Dune workspace and errors if Dune cannot describe
+/// a workspace. This command does not compile or mutate project sources.
+// RISK: `dune describe rules` has documented S-expression output but no
+// versioned schema. If Dune changes its action form, discovery fails closed.
+fn dune_sources(
+    root: &Path,
+) -> Result<
+    Option<(
+        Vec<(PathBuf, LogicalLibrary)>,
+        Vec<(PathBuf, LogicalLibrary)>,
+    )>,
+> {
+    let Some(workspace) = dune_workspace_root(root) else {
+        return Ok(None);
+    };
+    let scope = root
+        .strip_prefix(workspace)
+        .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "invalid Dune scope"))?;
+    let build_root = dune_build_directory(root)?.ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidConfiguration,
+            "Dune build context unavailable",
+        )
+    })?;
+    let build_root = build_root.strip_prefix(workspace).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidConfiguration,
+            "Dune build directory escapes workspace",
+        )
+    })?;
+    let mut command = Command::new("dune");
+    command.current_dir(workspace).args(["describe", "rules"]);
+    if !scope.as_os_str().is_empty() {
+        command.arg(scope);
     }
-    Ok(out)
+    let output = command
+        .output()
+        .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "Dune is unavailable"))?;
+    if !output.status.success() {
+        return Err(Error::new(
+            ErrorKind::InvalidConfiguration,
+            "Dune rule discovery failed",
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "Dune rules are not UTF-8"))?;
+    let tokens = sexp_tokens(&text)?;
+    let mut sources = Vec::new();
+    let mut mappings = Vec::new();
+    let mut start = 0;
+    while start < tokens.len() {
+        if tokens[start] != "(" {
+            return Err(Error::new(
+                ErrorKind::InvalidConfiguration,
+                "invalid Dune rule",
+            ));
+        }
+        let mut depth = 0;
+        let mut end = start;
+        loop {
+            if end >= tokens.len() {
+                return Err(Error::new(
+                    ErrorKind::InvalidConfiguration,
+                    "unterminated Dune rule",
+                ));
+            }
+            if tokens[end] == "(" {
+                depth += 1;
+            }
+            if tokens[end] == ")" {
+                depth -= 1;
+            }
+            end += 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        let rule = &tokens[start..end];
+        // A theory without modules has no `.vo` rule, but its dependency rule
+        // still declares the directory-to-logical-name mapping needed when a
+        // new module is created.
+        if let Some(target) = rule.iter().find(|token| token.ends_with(".theory.d")) {
+            let build_dir = Path::new(target).parent().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidConfiguration,
+                    "invalid Dune theory target",
+                )
+            })?;
+            let source_dir = build_dir.strip_prefix(&build_root).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidConfiguration,
+                    "invalid Dune theory context",
+                )
+            })?;
+            let source_dir = fs::canonicalize(workspace.join(source_dir)).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Dune theory directory unavailable",
+                )
+            })?;
+            if source_dir.starts_with(root) {
+                let action_dir = rule
+                    .windows(2)
+                    .find_map(|pair| (pair[0] == "chdir").then(|| Path::new(&pair[1])))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidConfiguration,
+                            "Dune theory action directory unavailable",
+                        )
+                    })?;
+                let action_dir = action_dir.strip_prefix(&build_root).map_err(|_| {
+                    Error::new(
+                        ErrorKind::InvalidConfiguration,
+                        "invalid Dune theory action directory",
+                    )
+                })?;
+                for pair in rule
+                    .windows(3)
+                    .filter(|triple| matches!(triple[0].as_str(), "-R" | "-Q"))
+                {
+                    let directory = fs::canonicalize(workspace.join(action_dir).join(&pair[1]));
+                    if directory.as_ref().is_ok_and(|dir| dir == &source_dir) {
+                        let prefix =
+                            LogicalLibrary(pair[2].split('.').map(str::to_owned).collect());
+                        if prefix
+                            .0
+                            .iter()
+                            .any(|part| validate_component(part).is_err())
+                        {
+                            return Err(Error::new(
+                                ErrorKind::InvalidConfiguration,
+                                "invalid Dune theory mapping",
+                            ));
+                        }
+                        if !mappings.contains(&(source_dir.clone(), prefix.clone())) {
+                            mappings.push((source_dir.clone(), prefix));
+                        }
+                    }
+                }
+            }
+        }
+        // Design note: only a `.vo` target with a Rocq compile action owns a
+        // source module. Other rules may mention `.v` merely as a dependency.
+        if rule.iter().any(|token| token.ends_with(".vo"))
+            && rule
+                .windows(2)
+                .any(|pair| pair[0].ends_with("rocq") && pair[1] == "compile")
+        {
+            let source = rule
+                .iter()
+                .rev()
+                .find(|token| token.ends_with(".v"))
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidConfiguration, "Rocq rule lacks source")
+                })?;
+            let source = workspace.join(source);
+            if source.starts_with(root) && source.is_file() {
+                let mapping = rule
+                    .windows(3)
+                    .filter(|triple| matches!(triple[0].as_str(), "-R" | "-Q"))
+                    .filter_map(|triple| {
+                        let dir = workspace.join(&triple[1]);
+                        source.starts_with(&dir).then(|| (dir, triple[2].clone()))
+                    })
+                    .max_by_key(|(dir, _)| dir.components().count())
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidConfiguration,
+                            "Rocq rule lacks source mapping",
+                        )
+                    })?;
+                let prefix = LogicalLibrary(mapping.1.split('.').map(str::to_owned).collect());
+                if prefix
+                    .0
+                    .iter()
+                    .any(|part| validate_component(part).is_err())
+                {
+                    return Err(Error::new(
+                        ErrorKind::InvalidConfiguration,
+                        "invalid Dune Rocq mapping",
+                    ));
+                }
+                let directory = fs::canonicalize(mapping.0).map_err(|_| {
+                    Error::new(
+                        ErrorKind::InvalidConfiguration,
+                        "Dune source mapping unavailable",
+                    )
+                })?;
+                let source = fs::canonicalize(source).map_err(|_| {
+                    Error::new(ErrorKind::InvalidConfiguration, "Dune source unavailable")
+                })?;
+                if !mappings.contains(&(directory.clone(), prefix.clone())) {
+                    mappings.push((directory.clone(), prefix.clone()));
+                }
+                sources.push((source, prefix));
+            }
+        }
+        start = end;
+    }
+    Ok(Some((sources, mappings)))
 }
 
 fn coqproject_mappings(root: &Path) -> Result<Vec<(PathBuf, LogicalLibrary)>> {
@@ -541,20 +688,6 @@ fn validate_component(value: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn ignored_tree(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root).ok().is_some_and(|relative| {
-        relative.components().any(|component| {
-            let Component::Normal(value) = component else {
-                return false;
-            };
-            matches!(
-                value.to_str(),
-                Some("_build" | ".git" | ".hg" | ".svn" | "target")
-            )
-        })
-    })
 }
 
 /// Bounded S-expression lexer for Dune and `_CoqProject`; it preserves quoted

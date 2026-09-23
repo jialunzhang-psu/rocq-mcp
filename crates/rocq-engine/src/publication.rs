@@ -123,17 +123,17 @@ pub(crate) fn publish(
         .map(FileReplacement::relative)
         .ok_or_else(PublishError::deferred)?;
     let stage = tempfile::tempdir().map_err(|_| PublishError::deferred())?;
-    copy_project(project, stage.path())?;
+    let staged_project = copy_project(project, stage.path())?;
     for replacement in &replacements {
-        let target = stage.path().join(replacement.relative());
+        let target = staged_project.join(replacement.relative());
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(io_failure)?;
         }
         fs::write(&target, &replacement.contents).map_err(io_failure)?;
         sync_file(&target)?;
     }
-    if let Err(error) = native_build(stage.path(), target, engine.config.close_timeout) {
-        if error.is_deferred() && !stage.path().join("dune-project").exists() {
+    if let Err(error) = native_build(&staged_project, target, engine.config.close_timeout) {
+        if error.is_deferred() && layout::dune_workspace_root(&staged_project).is_none() {
             reject(
                 attachment,
                 candidate,
@@ -144,9 +144,12 @@ pub(crate) fn publish(
         }
         return Err(error);
     }
-    if let Err(error) =
-        native_trust_audit(stage.path(), target, candidate, engine.config.close_timeout)
-    {
+    if let Err(error) = native_trust_audit(
+        &staged_project,
+        target,
+        candidate,
+        engine.config.close_timeout,
+    ) {
         match error {
             TrustAuditError::AxiomDependency(name) => {
                 let message =
@@ -353,8 +356,8 @@ fn rebuild_previous(project: &Path, proof: &ClosedProof, timeout: Duration) -> P
     if first.old_digest().is_some() {
         return native_build(project, first.relative(), timeout);
     }
-    if project.join("dune-project").exists() {
-        let output = native_process::run("dune", [OsString::from("build")], project, timeout)
+    if let Some(workspace) = layout::dune_workspace_root(project) {
+        let output = native_process::run("dune", [OsString::from("build")], workspace, timeout)
             .map_err(io_failure)?;
         if output.timed_out {
             return Err(PublishError::user(
@@ -422,7 +425,7 @@ fn replacements(
         ]);
     }
     let layout = layout::Layout::load(project, &[])?;
-    let (path, _) = layout.target(&candidate.declaration.identity.library)?;
+    let path = layout.target(&candidate.declaration.identity.library)?;
     let relative = path
         .strip_prefix(project)
         .map_err(|_| PublishError::user(ErrorKind::InvalidConfiguration, "target escapes project"))?
@@ -613,17 +616,28 @@ fn explicit_modules_range(source: &str) -> PublishResult<Option<(usize, usize)>>
     Ok(found)
 }
 
-pub(crate) fn copy_project(source: &Path, target: &Path) -> PublishResult<()> {
-    for entry in walkdir::WalkDir::new(source)
+/// Copies a Dune workspace or non-Dune project to a disposable root and
+/// returns the corresponding attached-project directory in the copy.
+pub(crate) fn copy_project(source: &Path, target: &Path) -> PublishResult<PathBuf> {
+    let workspace = layout::dune_workspace_root(source).unwrap_or(source);
+    let relative_project = source
+        .strip_prefix(workspace)
+        .map_err(|_| PublishError::deferred())?;
+    let build_dir = layout::dune_build_directory(source)?;
+    let engine_state = project_state::excluded_state_tree(source)?;
+    for entry in walkdir::WalkDir::new(workspace)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_entry(|entry| {
+            !build_dir
+                .as_ref()
+                .is_some_and(|dir| entry.path().starts_with(dir))
+                && !entry.path().starts_with(&engine_state)
+        })
     {
+        let entry = entry.map_err(|_| PublishError::deferred())?;
         let path = entry.path();
-        if path.starts_with(source.join("_build")) {
-            continue;
-        }
         let relative = path
-            .strip_prefix(source)
+            .strip_prefix(workspace)
             .map_err(|_| PublishError::deferred())?;
         let out = target.join(relative);
         if entry.file_type().is_dir() {
@@ -635,22 +649,19 @@ pub(crate) fn copy_project(source: &Path, target: &Path) -> PublishResult<()> {
             fs::copy(path, out).map_err(io_failure)?;
         }
     }
-    Ok(())
+    Ok(target.join(relative_project))
 }
 
 pub(crate) fn native_build(stage: &Path, target: &Path, timeout: Duration) -> PublishResult<()> {
-    if !stage.join("dune-project").exists() {
+    let Some((workspace, dune_target)) = dune_target(stage, target) else {
         return direct_native_build(stage, target, timeout);
-    }
+    };
     // Building the target artifact asks Dune for precisely its dependency
     // closure, so unrelated pre-existing broken modules do not veto close.
     let output = native_process::run(
         "dune",
-        [
-            OsString::from("build"),
-            target.with_extension("vo").as_os_str().to_owned(),
-        ],
-        stage,
+        [OsString::from("build"), dune_target.into_os_string()],
+        &workspace,
         timeout,
     )
     .map_err(io_failure)?;
@@ -666,6 +677,14 @@ pub(crate) fn native_build(stage: &Path, target: &Path, timeout: Duration) -> Pu
     } else {
         Err(PublishError::deferred())
     }
+}
+
+/// Maps a target relative to an attached project into its Dune workspace.
+/// Dune owns build targets and load paths; callers do not synthesize `-R/-Q`.
+pub(crate) fn dune_target(project: &Path, target: &Path) -> Option<(PathBuf, PathBuf)> {
+    let workspace = layout::dune_workspace_root(project)?;
+    let relative = project.strip_prefix(workspace).ok()?.join(target);
+    Some((workspace.to_owned(), relative.with_extension("vo")))
 }
 
 /// Builds the target's local dependency closure in topological order using
@@ -813,21 +832,20 @@ fn native_trust_audit(
         .as_bytes(),
     );
     fs::write(&path, source).map_err(|_| TrustAuditError::Deferred)?;
-    let (program, args) = if stage.join("dune-project").exists() {
-        (
-            "dune",
-            vec![
-                OsString::from("build"),
-                target.with_extension("vo").as_os_str().to_owned(),
-            ],
-        )
-    } else {
-        let mut args = vec![OsString::from("compile")];
-        args.extend(layout::compiler_options(stage).map_err(|_| TrustAuditError::Deferred)?);
-        args.push(target.as_os_str().to_owned());
-        ("rocq", args)
-    };
-    let output = native_process::run(program, args, stage, timeout)
+    let (program, args, working_dir) =
+        if let Some((workspace, dune_target)) = dune_target(stage, target) {
+            (
+                "dune",
+                vec![OsString::from("build"), dune_target.into_os_string()],
+                workspace,
+            )
+        } else {
+            let mut args = vec![OsString::from("compile")];
+            args.extend(layout::compiler_options(stage).map_err(|_| TrustAuditError::Deferred)?);
+            args.push(target.as_os_str().to_owned());
+            ("rocq", args, stage.to_owned())
+        };
+    let output = native_process::run(program, args, &working_dir, timeout)
         .map_err(|_| TrustAuditError::Deferred)?;
     if output.timed_out {
         return Err(TrustAuditError::BuildTimeout);
@@ -1027,21 +1045,20 @@ fn native_declared_library(
     // remove only derived staging products so `About` is guaranteed to run.
     let _ = fs::remove_file(path.with_extension("vo"));
     let _ = fs::remove_file(path.with_extension("glob"));
-    let (program, args) = if stage.join("dune-project").exists() {
-        (
-            "dune",
-            vec![
-                OsString::from("build"),
-                target.with_extension("vo").as_os_str().to_owned(),
-            ],
-        )
-    } else {
-        let mut args = vec![OsString::from("compile")];
-        args.extend(layout::compiler_options(stage).ok()?);
-        args.push(target.as_os_str().to_owned());
-        ("rocq", args)
-    };
-    let output = native_process::run(program, args, stage, timeout).ok()?;
+    let (program, args, working_dir) =
+        if let Some((workspace, dune_target)) = dune_target(stage, target) {
+            (
+                "dune",
+                vec![OsString::from("build"), dune_target.into_os_string()],
+                workspace,
+            )
+        } else {
+            let mut args = vec![OsString::from("compile")];
+            args.extend(layout::compiler_options(stage).ok()?);
+            args.push(target.as_os_str().to_owned());
+            ("rocq", args, stage.to_owned())
+        };
+    let output = native_process::run(program, args, &working_dir, timeout).ok()?;
     if output.timed_out || output.overflow || !output.status.success() {
         return None;
     }

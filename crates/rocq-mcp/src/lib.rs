@@ -21,9 +21,7 @@ mod tests {
         assert_eq!(tools.len(), 6);
         for tool in tools {
             let value = serde_json::to_value(tool).expect("tool is serializable");
-            if tool.name != "query" {
-                assert_eq!(value["inputSchema"]["additionalProperties"], false);
-            }
+            assert_eq!(value["inputSchema"]["additionalProperties"], false);
             let schema = value["inputSchema"].to_string();
             assert!(!schema.contains("cursor"));
             assert!(!schema.contains("workspace"));
@@ -31,6 +29,59 @@ mod tests {
             if tool.name != "start" {
                 assert!(!schema.contains("project_path"));
             }
+        }
+    }
+
+    #[test]
+    fn query_schema_exposes_every_kind_without_union_flattening() {
+        let query = tool_definitions()
+            .iter()
+            .find(|tool| tool.name == "query")
+            .expect("query tool exists");
+        let value = serde_json::to_value(query).expect("tool is serializable");
+        assert!(value["inputSchema"].get("oneOf").is_none());
+        assert_eq!(
+            value["inputSchema"]["properties"]["kind"]["enum"],
+            json!([
+                "goals",
+                "search",
+                "statement",
+                "proof",
+                "definition",
+                "assumptions",
+                "dependencies",
+                "type",
+                "notations"
+            ])
+        );
+        for field in ["target", "expression", "name_contains", "statement_pattern"] {
+            assert!(value["inputSchema"]["properties"].get(field).is_some());
+        }
+        assert!(
+            value["description"]
+                .as_str()
+                .unwrap()
+                .contains("require `target`")
+        );
+        assert!(
+            value["description"]
+                .as_str()
+                .unwrap()
+                .contains("require `expression`")
+        );
+    }
+
+    #[test]
+    fn every_tool_description_comes_from_its_handbook_section() {
+        for tool in tool_definitions() {
+            let heading = format!("## `{}`\n", tool.name);
+            let handbook = include_str!("../COMMANDS.md");
+            let tail = handbook
+                .split_once(&heading)
+                .expect("tool has handbook section")
+                .1;
+            let section = tail.split("\n## ").next().unwrap().trim();
+            assert_eq!(tool.description.as_deref(), Some(section));
         }
     }
 

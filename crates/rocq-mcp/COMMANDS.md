@@ -30,6 +30,10 @@ Returns `{"declarations":[{"name":"Demo.t","statement":"Theorem t : True","statu
 ## `query`
 
 The query variant is `args.kind`; there is no `request` wrapper.
+`goals` takes no other fields. `statement`, `proof`, `definition`,
+`assumptions`, and `dependencies` require `target`. `type` and `notations`
+require `expression`. `search` accepts only its optional filters shown below.
+Do not mix fields from different variants.
 
 ```json
 {"tool":"query","args":{"kind":"goals"}}

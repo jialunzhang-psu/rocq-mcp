@@ -382,7 +382,9 @@ impl ProofRepository {
     /// Opens the durable store, removes incomplete temporary writes, fsyncs a
     /// newly-created hierarchy, then builds a fail-closed in-memory index.
     pub(crate) fn open(project: &Path) -> Result<Self, RepositoryError> {
-        let directory = project.join("_build/.rocq-engine/proofs");
+        let directory = crate::project_state::project_state_directory(project)
+            .map_err(|_| RepositoryError::Storage)?
+            .join("proofs");
         let existed = directory.exists();
         fs::create_dir_all(&directory).map_err(io_error)?;
         if !existed {

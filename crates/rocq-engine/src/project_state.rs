@@ -1,5 +1,6 @@
 //! Per-project attachment ownership for I2.
 use crate::repository::{DeclarationIdentity, PendingRecord, ProofRepository, RepositoryError};
+use crate::{Error, ErrorKind, layout};
 use fs2::FileExt;
 use std::{
     collections::BTreeMap,
@@ -19,6 +20,32 @@ pub(crate) enum AttachmentError {
     ProjectState,
 }
 
+/// Durable state is project-owned but not a Dune build artifact: `dune clean`
+/// must not erase a solved candidate before publication or recovery.
+pub(crate) fn project_state_directory(project: &Path) -> crate::Result<PathBuf> {
+    if let Some(workspace) = layout::dune_workspace_root(project) {
+        let scope = project.strip_prefix(workspace).map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidConfiguration,
+                "invalid Dune attachment scope",
+            )
+        })?;
+        Ok(workspace.join(".rocq-engine").join(scope))
+    } else {
+        Ok(project.join("_build/.rocq-engine"))
+    }
+}
+
+/// Directory that a staging copy must exclude. Non-Dune projects retain the
+/// established build-state contract; Dune workspaces keep proofs outside build.
+pub(crate) fn excluded_state_tree(project: &Path) -> crate::Result<PathBuf> {
+    if let Some(workspace) = layout::dune_workspace_root(project) {
+        Ok(workspace.join(".rocq-engine"))
+    } else {
+        Ok(project.join("_build"))
+    }
+}
+
 /// Current-view attachment. Its gate never represents a historical generation.
 pub(crate) struct ProjectAttachment {
     root: PathBuf,
@@ -32,7 +59,10 @@ impl ProjectAttachment {
     /// durable proof records before publishing the attachment.
     pub(crate) fn attach(project: &Path) -> Result<Arc<Self>, AttachmentError> {
         let root = fs::canonicalize(project).map_err(|_| AttachmentError::ProjectState)?;
-        let state = root.join("_build/.rocq-engine");
+        let state = project_state_directory(&root).map_err(|_| AttachmentError::ProjectState)?;
+        if layout::dune_workspace_root(&root).is_some() {
+            migrate_legacy_dune_state(&root, &state)?;
+        }
         fs::create_dir_all(&state).map_err(|_| AttachmentError::ProjectState)?;
         let lock = OpenOptions::new()
             .create(true)
@@ -157,6 +187,40 @@ impl ProjectAttachment {
         Ok(record)
     }
 }
+
+/// Migrates the old source-local state only while holding its lifetime lock.
+/// A live old server prevents attachment; conflicting durable stores fail
+/// closed rather than silently choosing one set of proof records.
+fn migrate_legacy_dune_state(
+    project: &Path,
+    destination: &Path,
+) -> std::result::Result<(), AttachmentError> {
+    let legacy = project.join("_build/.rocq-engine");
+    if !legacy.exists() || legacy == destination {
+        return Ok(());
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(legacy.join("project.lock"))
+        .map_err(|_| AttachmentError::ProjectState)?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            return Err(AttachmentError::Contended);
+        }
+        Err(_) => return Err(AttachmentError::ProjectState),
+    }
+    if destination.exists() {
+        return Err(AttachmentError::Recovery);
+    }
+    fs::create_dir_all(destination.parent().ok_or(AttachmentError::ProjectState)?)
+        .map_err(|_| AttachmentError::ProjectState)?;
+    fs::rename(&legacy, destination).map_err(|_| AttachmentError::ProjectState)?;
+    Ok(())
+}
 impl Drop for ProjectAttachment {
     fn drop(&mut self) {
         let _ = self._lock.unlock();
@@ -263,5 +327,60 @@ mod tests {
             &r.attach(t.path()).unwrap(),
             &r.attach(t.path()).unwrap()
         ));
+    }
+
+    #[test]
+    fn dune_state_is_durable_outside_build_and_migrates_under_old_lock() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("dune-project"), "(lang dune 3.21)\n").unwrap();
+        fs::create_dir(project.path().join("Library")).unwrap();
+        let library = project.path().join("Library");
+        let legacy = library.join("_build/.rocq-engine");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("project.lock"), "").unwrap();
+        let attached = ProjectAttachment::attach(&library).unwrap();
+        assert!(
+            project
+                .path()
+                .join(".rocq-engine/Library/project.lock")
+                .is_file()
+        );
+        assert!(!legacy.exists());
+        drop(attached);
+    }
+
+    #[test]
+    fn live_legacy_dune_attachment_prevents_parallel_migration() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("dune-project"), "(lang dune 3.21)\n").unwrap();
+        let legacy = project.path().join("_build/.rocq-engine");
+        fs::create_dir_all(&legacy).unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(legacy.join("project.lock"))
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+        assert!(matches!(
+            ProjectAttachment::attach(project.path()),
+            Err(AttachmentError::Contended)
+        ));
+        assert!(legacy.exists());
+    }
+
+    #[test]
+    fn legacy_dune_state_bytes_survive_migration() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("dune-project"), "(lang dune 3.21)\n").unwrap();
+        let legacy = project.path().join("_build/.rocq-engine");
+        fs::create_dir_all(legacy.join("proofs")).unwrap();
+        fs::write(legacy.join("proofs/bad-record"), b"recover-me").unwrap();
+        let _attached = ProjectAttachment::attach(project.path()).unwrap();
+        assert_eq!(
+            fs::read(project.path().join(".rocq-engine/proofs/bad-record")).unwrap(),
+            b"recover-me"
+        );
+        assert!(!legacy.exists());
     }
 }

@@ -138,6 +138,11 @@ fn coqproject_q_r_i_mappings_are_unique_and_fail_closed_when_unsafe_or_overlappi
 fn dune_theory_and_library_module_section_boundaries_stay_structured() {
     let project = tempfile::tempdir().unwrap();
     fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(
         project.path().join("dune"),
         "(rocq.theory (name Demo.Lib) (modules Main))\n",
     )
@@ -350,6 +355,12 @@ fn source_contract_has_no_path_based_new_declaration_or_regex_identity_parser() 
 #[test]
 fn generated_and_vcs_trees_are_not_logical_project_sources() {
     let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
     fs::create_dir_all(project.path().join("_build/default")).unwrap();
     fs::create_dir_all(project.path().join(".git/objects")).unwrap();
     fs::create_dir_all(project.path().join(".hg/store")).unwrap();
@@ -388,13 +399,88 @@ fn generated_and_vcs_trees_are_not_logical_project_sources() {
 }
 
 #[test]
+fn attached_dune_project_uses_dune_selected_sources() {
+    let Some(path) = std::env::var_os("ROCQ_MCP_TEST_DUNE_PROJECT") else {
+        return;
+    };
+    let root = fs::canonicalize(path).unwrap();
+    let layout = crate::layout::Layout::load(&root, &[]).unwrap();
+    assert!(
+        layout
+            .files()
+            .iter()
+            .any(|path| path.ends_with("Spine/Roadmap.v"))
+    );
+    assert!(
+        !layout
+            .files()
+            .iter()
+            .any(|path| path.to_string_lossy().contains(".rocq-mcp"))
+    );
+}
+
+#[test]
+fn dune_qualified_subdirs_and_exclusions_define_the_source_set() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("dune"),
+        "(include_subdirs qualified)\n(dirs :standard \\ omitted)\n(rocq.theory (name Demo))\n",
+    )
+    .unwrap();
+    for dir in ["Nested", "omitted", ".rocq-mcp/session", "_build/default"] {
+        fs::create_dir_all(project.path().join(dir)).unwrap();
+    }
+    for file in [
+        "Nested/Included.v",
+        "omitted/Excluded.v",
+        ".rocq-mcp/session/source.v",
+        "_build/default/Generated.v",
+    ] {
+        fs::write(project.path().join(file), "Theorem t : True. Admitted.\n").unwrap();
+    }
+    let root = fs::canonicalize(project.path()).unwrap();
+    let layout = crate::layout::Layout::load(&root, &[]).unwrap();
+    assert_eq!(layout.files(), vec![root.join("Nested/Included.v")]);
+}
+
+#[test]
+fn empty_dune_theory_keeps_its_mapping_for_a_new_module() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let layout = crate::layout::Layout::load(&root, &[]).unwrap();
+    assert!(layout.files().is_empty());
+    assert_eq!(
+        layout
+            .target(&LogicalLibrary(vec!["Demo".into(), "Fresh".into()]))
+            .unwrap(),
+        root.join("Fresh.v")
+    );
+}
+
+#[test]
 fn dune_theory_recursively_parses_its_own_stanza_and_explicit_modules() {
     let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
     fs::create_dir_all(project.path().join("_build/default")).unwrap();
     fs::write(
         project.path().join("dune"),
         "; (rocq.theory (name Wrong.Library) (modules Ghost))\n\
-         (rule (targets \"a literal (name Wrong.Library)\"))\n\
+         (rule (target bogus) (action (write-file bogus \"a literal (name Wrong.Library)\")))\n\
          (rocq.theory\n\
            (name \"Demo.Library\")\n\
            (modules\n\

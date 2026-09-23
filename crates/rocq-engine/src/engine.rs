@@ -230,7 +230,7 @@ impl Engine {
         }
 
         let layout = layout::Layout::load(attachment.root(), &[])?;
-        let (path, _explicit_dune_modules) = layout.target(&declaration.identity.library)?;
+        let path = layout.target(&declaration.identity.library)?;
         if !path.starts_with(attachment.root()) {
             return Err(Error::new(
                 ErrorKind::InvalidConfiguration,

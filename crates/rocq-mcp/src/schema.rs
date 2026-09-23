@@ -3,6 +3,20 @@
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
+const COMMANDS: &str = include_str!("../COMMANDS.md");
+
+/// Return one tool's complete handbook section as its MCP description.
+/// A missing section is a packaging error and fails catalog initialization.
+fn tool_description(name: &str) -> &'static str {
+    let heading = format!("## `{name}`\n");
+    let start = COMMANDS
+        .find(&heading)
+        .unwrap_or_else(|| panic!("missing COMMANDS.md section for {name}"))
+        + heading.len();
+    let tail = &COMMANDS[start..];
+    tail[..tail.find("\n## ").unwrap_or(tail.len())].trim()
+}
+
 /// Build a closed object schema with the given properties and required fields.
 fn schema(p: Value, r: &[&str]) -> serde_json::Map<String, Value> {
     serde_json::Map::from_iter([
@@ -18,72 +32,33 @@ pub fn tool_definitions() -> &'static [Tool] {
     static T: OnceLock<Vec<Tool>> = OnceLock::new();
     T.get_or_init(|| {
         let s = json!({"type": "string", "minLength": 1});
-        let target_queries = [
-            "statement",
-            "proof",
-            "definition",
-            "assumptions",
-            "dependencies",
-        ]
-        .into_iter()
-        .map(|kind| {
+        // Design note: a root-level oneOf is flattened incorrectly by some
+        // tool-discovery clients, leaving only its first kind visible. Keep
+        // the wire schema flat and enforce kind-specific fields in dispatch.
+        let query_schema = schema(
             json!({
-                "type": "object",
-                "properties": {"kind": {"const": kind}, "target": s},
-                "required": ["kind", "target"],
-                "additionalProperties": false,
-            })
-        })
-        .collect::<Vec<_>>();
-        let expression_queries = ["type", "notations"]
-            .into_iter()
-            .map(|kind| {
-                json!({
-                    "type": "object",
-                    "properties": {"kind": {"const": kind}, "expression": s},
-                    "required": ["kind", "expression"],
-                    "additionalProperties": false,
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut query_variants = target_queries;
-        query_variants.extend(expression_queries);
-        query_variants.push(json!({
-            "type": "object",
-            "properties": {"kind": {"const": "goals"}},
-            "required": ["kind"],
-            "additionalProperties": false,
-        }));
-        query_variants.push(json!({
-            "type": "object",
-            "properties": {
-                "kind": {"const": "search"},
+                "kind": {"enum": ["goals", "search", "statement", "proof", "definition", "assumptions", "dependencies", "type", "notations"]},
+                "target": s,
+                "expression": s,
                 "name_contains": s,
                 "statement_pattern": s,
                 "status": {"enum": ["Open", "Completed", "Pending", "Rejected"]},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 "offset": {"type": "integer", "minimum": 0},
-            },
-            "required": ["kind"],
-            "additionalProperties": false,
-        }));
+            }),
+            &["kind"],
+        );
         let v = [
             (
                 "start",
-                "Attach to a project",
                 schema(json!({"project_path":s}), &["project_path"]),
             ),
             (
                 "query",
-                "Query declarations or goals",
-                serde_json::Map::from_iter([
-                    ("type".to_owned(), Value::String("object".to_owned())),
-                    ("oneOf".to_owned(), Value::Array(query_variants)),
-                ]),
+                query_schema,
             ),
             (
                 "declare",
-                "Declare a theorem",
                 schema(
                     json!({"name":s,"statement":s,"kind":s,"library":s}),
                     &["name", "statement"],
@@ -91,17 +66,14 @@ pub fn tool_definitions() -> &'static [Tool] {
             ),
             (
                 "prove",
-                "Select a theorem",
                 schema(json!({"theorem":s}), &["theorem"]),
             ),
             (
                 "check",
-                "Submit proof commands",
                 schema(json!({"commands":s}), &["commands"]),
             ),
             (
                 "check_multi",
-                "Try candidates",
                 schema(
                     json!({"candidates":{"type":"array","items":s,"minItems":1,"maxItems":20}}),
                     &["candidates"],
@@ -109,8 +81,8 @@ pub fn tool_definitions() -> &'static [Tool] {
             ),
         ];
         v.into_iter()
-            .map(|(n, d, sc)| {
-                Tool::new(n, d, sc).with_annotations(
+            .map(|(n, sc)| {
+                Tool::new(n, tool_description(n), sc).with_annotations(
                     ToolAnnotations::default()
                         .read_only(n == "query" || n == "check_multi")
                         .open_world(false),

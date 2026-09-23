@@ -249,13 +249,13 @@ fn native_normalize_axioms(
             "cannot create trust staging area",
         )
     })?;
-    publication::copy_project(project, stage.path()).map_err(|error| {
+    let staged_project = publication::copy_project(project, stage.path()).map_err(|error| {
         error.into_user_or(
             ErrorKind::InvalidConfiguration,
             "trust staging storage is unavailable",
         )
     })?;
-    let layout = layout::Layout::load(stage.path(), &[])?;
+    let layout = layout::Layout::load(&staged_project, &[])?;
     let mut remaining = axioms.clone();
     let mut normalized = BTreeMap::<String, String>::new();
     for file in layout.files() {
@@ -281,33 +281,35 @@ fn native_normalize_axioms(
                 "trust staging write failed",
             )
         })?;
-        publication::native_build(
-            stage.path(),
-            file.strip_prefix(stage.path()).map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "trust staging path invalid",
-                )
-            })?,
-            timeout,
-        )
-        .map_err(|error| {
-            error.into_user_or(
-                ErrorKind::InvalidConfiguration,
-                "explicit baseline could not be compiled",
-            )
-        })?;
-        let relative = file.strip_prefix(stage.path()).map_err(|_| {
+        let relative = file.strip_prefix(&staged_project).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidConfiguration,
                 "trust staging path invalid",
             )
         })?;
-        let _ = fs::remove_file(file.with_extension("vo"));
-        let mut args = vec![std::ffi::OsString::from("compile")];
-        args.extend(layout::compiler_options(stage.path())?);
-        args.push(relative.as_os_str().to_owned());
-        let checked = native_process::run("rocq", args, stage.path(), timeout).map_err(|_| {
+        let checked = if let Some((workspace, target)) =
+            publication::dune_target(&staged_project, relative)
+        {
+            native_process::run(
+                "dune",
+                [std::ffi::OsString::from("build"), target.into_os_string()],
+                &workspace,
+                timeout,
+            )
+        } else {
+            publication::native_build(&staged_project, relative, timeout).map_err(|error| {
+                error.into_user_or(
+                    ErrorKind::InvalidConfiguration,
+                    "explicit baseline could not be compiled",
+                )
+            })?;
+            let _ = fs::remove_file(file.with_extension("vo"));
+            let mut args = vec![std::ffi::OsString::from("compile")];
+            args.extend(layout::compiler_options(&staged_project)?);
+            args.push(relative.as_os_str().to_owned());
+            native_process::run("rocq", args, &staged_project, timeout)
+        }
+        .map_err(|_| {
             Error::new(
                 ErrorKind::InvalidConfiguration,
                 "native baseline type check unavailable",

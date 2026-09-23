@@ -567,6 +567,85 @@ fn typed_queries_are_contextual_validated_and_read_only() {
 }
 
 #[test]
+fn named_audits_use_the_target_library_not_the_first_catalog_library() {
+    let lab = Lab::new("Theorem a : True. Proof. exact I. Qed.\n");
+    fs::write(
+        lab.path().join("Second.v"),
+        "Module Inner. Theorem b : True. Proof. exact I. Qed. End Inner.\n",
+    )
+    .unwrap();
+    let result = lab
+        .engine
+        .query(
+            lab.path(),
+            None,
+            Query::Assumptions {
+                name: "Second.Inner.b".into(),
+            },
+        )
+        .unwrap();
+    let QueryResult::Text(text) = result else {
+        panic!("assumption query must return text");
+    };
+    assert!(text.contains("Closed under the global context"), "{text}");
+}
+
+#[test]
+fn native_query_keeps_external_relative_project_load_path() {
+    let parent = tempfile::tempdir().unwrap();
+    let external = parent.path().join("external");
+    let project = parent.path().join("project");
+    fs::create_dir(&external).unwrap();
+    fs::create_dir(&project).unwrap();
+    fs::write(external.join("Ext.v"), "Definition ext : nat := 0.\n").unwrap();
+    let output = Command::new("rocq")
+        .args(["compile", "-Q"])
+        .arg(&external)
+        .arg("External")
+        .arg(external.join("Ext.v"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::write(
+        project.join("_RocqProject"),
+        "-Q ../external External\n-Q . Demo\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("Main.v"),
+        "From External Require Import Ext.\nTheorem t : ext = 0. Proof. reflexivity. Qed.\n",
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let engine = Engine::new(EngineConfig {
+        state_parent: state.path().join("state"),
+        trace_memory_bytes: 1024,
+        operation_timeout: Duration::from_secs(10),
+        close_timeout: Duration::from_secs(10),
+        runtime_cache_bytes: 1024,
+        max_pet_processes: 4,
+    })
+    .unwrap();
+    let result = engine
+        .query(
+            &project,
+            None,
+            Query::Assumptions {
+                name: "Main.t".into(),
+            },
+        )
+        .unwrap();
+    let QueryResult::Text(text) = result else {
+        panic!("assumption query must return text");
+    };
+    assert!(text.contains("Closed under the global context"), "{text}");
+}
+
+#[test]
 fn catalog_handles_qualified_ambiguous_comments_strings_and_unicode() {
     let lab = Lab::new(
         "(* nested (* comment. *) *)\nModule A. Theorem t : True. Admitted. End A.\nModule B. Theorem t : True. Admitted. End B.\nTheorem λ : True. Admitted.\nDefinition s := \"a.dot\".\n",
@@ -1292,6 +1371,74 @@ fn dune_theory_project_can_publish_and_independently_build() {
         "independent Dune build failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn dune_subdirectory_attachment_publishes_through_workspace_build() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.21)\n(using rocq 0.11)\n",
+    )
+    .unwrap();
+    let theory = project.path().join("theories");
+    fs::create_dir(&theory).unwrap();
+    fs::write(theory.join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(theory.join("Main.v"), "Theorem t : True. Admitted.\n").unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let engine = engine_with_pet_capacity(&state.path().join("state"), 2);
+    let opened = open_theorem(&engine, &theory, "t").unwrap();
+    let result = engine.step(attempt(&opened), "exact I.").unwrap();
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(
+        fs::read_to_string(theory.join("Main.v"))
+            .unwrap()
+            .contains("Qed.")
+    );
+    assert!(
+        project
+            .path()
+            .join(".rocq-engine/theories/project.lock")
+            .is_file()
+    );
+    assert!(
+        Command::new("dune")
+            .arg("clean")
+            .current_dir(project.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        project
+            .path()
+            .join(".rocq-engine/theories/project.lock")
+            .is_file()
+    );
+}
+
+#[test]
+fn dune_subdirectory_audit_uses_dune_load_paths() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.21)\n(using rocq 0.11)\n",
+    )
+    .unwrap();
+    let theory = project.path().join("theories");
+    fs::create_dir(&theory).unwrap();
+    fs::write(theory.join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(
+        theory.join("Main.v"),
+        "Axiom trusted : True.\nTheorem t : True. Admitted.\n",
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let engine = engine_with_pet_capacity(&state.path().join("state"), 2);
+    let opened = open_theorem(&engine, &theory, "t").unwrap();
+    let result = engine.step(attempt(&opened), "exact trusted.").unwrap();
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert_eq!(result.state.lifecycle, ProofLifecycle::Completed);
 }
 
 #[test]

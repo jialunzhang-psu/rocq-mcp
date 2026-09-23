@@ -82,6 +82,7 @@ impl Engine {
                 self.query_text(
                     project,
                     &catalog,
+                    Some(&item.identity.library),
                     pet_runtime::FixedPetQuery::Assumptions(local_name(&item.identity)),
                 )
             }
@@ -90,6 +91,7 @@ impl Engine {
                 self.query_text(
                     project,
                     &catalog,
+                    Some(&item.identity.library),
                     pet_runtime::FixedPetQuery::Dependencies(local_name(&item.identity)),
                 )
             }
@@ -98,6 +100,7 @@ impl Engine {
                 self.query_text(
                     project,
                     &catalog,
+                    None,
                     pet_runtime::FixedPetQuery::ExpressionType(expression),
                 )
             }
@@ -106,6 +109,7 @@ impl Engine {
                 self.query_text(
                     project,
                     &catalog,
+                    None,
                     pet_runtime::FixedPetQuery::Notation(expression),
                 )
             }
@@ -120,11 +124,18 @@ impl Engine {
         &self,
         project: &Path,
         catalog: &ProjectCatalog,
+        target_library: Option<&LogicalLibrary>,
     ) -> Result<pet_runtime::PetState> {
-        let library = catalog
-            .declarations
-            .first()
-            .map(|item| item.identity.library.clone())
+        // Design note: a named theorem is only visible after its own library's
+        // source prefix. An arbitrary first library cannot answer its audit.
+        let library = target_library
+            .cloned()
+            .or_else(|| {
+                catalog
+                    .declarations
+                    .first()
+                    .map(|item| item.identity.library.clone())
+            })
             .ok_or_else(|| {
                 Error::new(
                     ErrorKind::InvalidConfiguration,
@@ -163,6 +174,7 @@ impl Engine {
         &self,
         project: &Path,
         catalog: &ProjectCatalog,
+        target_library: Option<&LogicalLibrary>,
         query: pet_runtime::FixedPetQuery,
     ) -> Result<QueryResult> {
         let deadline = std::time::Instant::now()
@@ -170,7 +182,7 @@ impl Engine {
             .unwrap_or_else(std::time::Instant::now);
         let mut protocol_restarted = false;
         loop {
-            let state = self.query_state(project, catalog)?;
+            let state = self.query_state(project, catalog, target_library)?;
             match self.pet_runtime.run_fixed(&state, query.clone()) {
                 Ok(text) => {
                     return Ok(QueryResult::Text(text));

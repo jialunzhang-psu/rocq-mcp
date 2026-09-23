@@ -20,8 +20,9 @@ candidate evaluation use PET without appending; `check_multi` evaluates 1–20
 one-sentence candidates from the same parent in input order.
 
 A goals-clear branch wins the forest's per-root close arbitration. It is written
-as a checksummed, fsynced `SolvedCandidate` under
-`_build/.rocq-engine/proofs/` before validation begins. This is the first
+as a checksummed, fsynced `SolvedCandidate` under the project-owned
+`.rocq-engine/<attached-scope>/proofs/` for Dune workspaces, or
+`_build/.rocq-engine/proofs/` for non-Dune projects, before validation begins. This is the first
 crash-durable proof state. No second branch can replace it. Native validation
 and trust audit promote it atomically to `ClosedProof`, which includes an
 ordered file-replacement plan. Recovery reads either complete phase. A rejected
@@ -46,13 +47,13 @@ Close is the only source commit boundary. The engine serializes publication per
 project, rereads the latest source, validates the declaration anchor, stages
 source changes, checks the proof with native Rocq, audits assumptions, and
 builds the affected project. It then publishes source/metadata replacements,
-refreshes the real `_build`, detaches all project PET runtimes, and acknowledges
+asks Dune to refresh its build tree (or compiles the non-Dune project), detaches all project PET runtimes, and acknowledges
 the durable record. A successful solving call waits for this sequence. PET is
 restarted lazily on the next operation; it never hot-reloads a changed `.vo`.
 
 The target module and its affected dependency closure must build. Unrelated
 modules already known to be broken may remain broken. Dune projects use their
-normal `_build`; otherwise the engine invokes native compilation. A content-keyed
+workspace build context, including when attached below its root; otherwise the engine invokes native compilation. A content-keyed
 baseline build distinguishes old unrelated failures from regressions caused by
 this close.
 
@@ -88,4 +89,5 @@ The public error vocabulary is `ErrorKind` in `api.rs`; the MCP adapter maps it
 one-to-one. Internal races, PET death, and publication recovery do not become
 new user-facing error kinds. External processes have bounded I/O, deadlines,
 and owned process cleanup. The engine does not claim crash durability for open
-unsolved traces, nor does it intercept external deletion of `_build`.
+unsolved traces, nor does it intercept external deletion of build artifacts. Dune
+durable proof records live outside Dune's cleanable build directory.
