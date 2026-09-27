@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from .common import ATTACHED, declaration, prove_args
 
-from .common import OPEN_TRUE, command, event, invalid_request, proof_lifecycle_prefix, write_materialized_family
+
+from .common import OPEN_TRUE, command, event, invalid_request, write_materialized_family, write_jsonl
 from .matrix import ROOT
 import json
 import shutil
@@ -12,7 +14,12 @@ import shutil
 def declare_parameter_args(
     record: dict[str, object], axes: dict[str, object]
 ) -> dict[str, object]:
-    args: dict[str, object] = {}
+    # Design note: library and file are required placement identities in the
+    # current protocol. Invalid-axis cases vary only the field they exercise.
+    args: dict[str, object] = {
+        "library": "Matrix.Main",
+        "file": "theories/Main.v",
+    }
     name = str(axes["name"])
     if name == "null":
         args["name"] = None
@@ -67,7 +74,7 @@ def declare_parameter_expected(
     if axes["statement"] != "valid":
         return invalid_request("statement must be a non-empty string")
     keyword = "Theorem" if kind == "missing" else kind
-    library = "Matrix.Main" if axes["layout"] == "coqproject" else "MatrixDune.Main"
+    library = "Matrix.Main"
     name = f"fresh_{record['case']}"
     return {
         "theorem": f"{library}.{name}",
@@ -148,6 +155,8 @@ def materialize_declare_boundaries(records: list[dict[str, object]]) -> None:
                 "name": name,
                 "statement": statement,
                 "kind": kind,
+                "library": "Matrix.Main",
+                "file": "theories/Main.v",
             }
             if extra == "present":
                 args["extra"] = True
@@ -168,25 +177,30 @@ def materialize_declare_boundaries(records: list[dict[str, object]]) -> None:
                     "kind": "invalid_declaration",
                     "message": "declaration statement identity does not match request",
                 }
+            elif statement_class == "multiple_sentences":
+                # A declaration argument is sent to PET as one vernacular
+                # header.  PET parses the first sentence as the declaration
+                # and consequently rejects a second sentence in the same
+                # request (rather than silently discarding it).
+                expected = {
+                    "kind": "proof_step_failed",
+                    "message": "PET rejected request (-32003): Coq: Tactic expected.",
+                }
             elif statement_class in {"unterminated_comment", "unterminated_string"}:
                 expected = {
-                    "kind": "invalid_configuration",
-                    "message": "unterminated Rocq comment or string",
+                    "kind": "proof_step_failed",
+                    "message": (
+                        "PET rejected request (-32003): Coq: Syntax Error: Lexer: "
+                        + ("Unterminated comment" if statement_class == "unterminated_comment" else "Unterminated string")
+                    ),
                 }
             elif statement_class == "nul":
                 expected = {
                     "kind": "proof_step_failed",
-                    "message": (
-                        "PET rejected request (-32006): Theorem_not_found: "
-                        "[find_thm] Theorem not found!"
-                    ),
+                    "message": "PET rejected request (-32003): Coq: Syntax Error: Lexer: Undefined token",
                 }
             else:
-                normalized = (
-                    f"{kind} {name} : True. False."
-                    if statement_class == "multiple_sentences"
-                    else f"{kind} {name} : True"
-                )
+                normalized = f"{kind} {name} : True"
                 expected = {
                     "theorem": f"Matrix.Main.{name}",
                     "statement": normalized,
@@ -203,7 +217,6 @@ def declare_failure_is_materialized(axes: dict[str, object]) -> bool:
         "duplicate",
         "invalid_module_context",
         "logical_library_unavailable",
-        "state_directory_unavailable",
     }
 
 def materialize_declare_failures(records: list[dict[str, object]]) -> None:
@@ -224,7 +237,13 @@ def materialize_declare_failures(records: list[dict[str, object]]) -> None:
             axes = record["axes"]
             assert isinstance(axes, dict)
             if axes["failure"] == "duplicate":
-                args = {"name": "truth", "statement": "True", "kind": "Theorem"}
+                args = {
+                    "name": "truth",
+                    "statement": "True",
+                    "kind": "Theorem",
+                    "library": "Matrix.Main",
+                    "file": "theories/Main.v",
+                }
                 expected = {
                     "kind": "invalid_declaration",
                     "message": "declaration identity is already present",
@@ -234,72 +253,81 @@ def materialize_declare_failures(records: list[dict[str, object]]) -> None:
                     "name": "Missing.new_truth",
                     "statement": "True",
                     "kind": "Theorem",
+                    "library": "Matrix.Main",
+                    "file": "theories/Main.v",
                 }
                 expected = {
                     "kind": "invalid_declaration",
-                    "message": "module context does not match declaration identity",
+                    "message": "declaration name must be local or qualified by its library and modules",
                 }
             else:
-                empty = (
-                    "empty_project"
-                    if axes["layout"] == "coqproject"
-                    else "empty_dune_project"
-                )
-                events.append(
-                    command("start", {"project_path": empty}, {"declarations": []})
-                )
-                args = {"name": "fresh", "statement": "True", "kind": "Theorem"}
+                args = {
+                    "name": "fresh",
+                    "statement": "True",
+                    "kind": "Theorem",
+                    "library": "Missing.Main",
+                    "file": "theories/Main.v",
+                }
                 expected = {
                     "kind": "invalid_configuration",
-                    "message": "project has no logical library",
+                    "message": "logical library is not selected by Dune",
                 }
             events.append(command("declare", args, expected))
 
     write_materialized_family("declare_failures", deterministic, append)
-    materialize_declare_state_failures([
-        record for record in records
-        if isinstance(record["axes"], dict)
-        and record["axes"]["failure"] == "state_directory_unavailable"
-    ])
     materialize_declare_race_failures([
         record for record in records
         if isinstance(record["axes"], dict)
         and record["axes"]["failure"] == "declaration_changed"
     ])
-    materialize_declare_ambiguous_failures([
-        record for record in records
-        if isinstance(record["axes"], dict)
-        and record["axes"]["failure"] == "ambiguous_location"
-    ])
 
-def materialize_declare_ambiguous_failures(records: list[dict[str, object]]) -> None:
-    """A new logical library has two equally specific reversible mappings."""
-    directory = ROOT / "traces/ambiguous_library/generated/declare_failures"
+def materialize_dune_duplicate_theory(records: list[dict[str, object]]) -> None:
+    """Exercise Dune's duplicate-theory rejection after lazy attachment.
+
+    ``start`` intentionally asks Dune only for the workspace root; it does not
+    load the Rocq rules (or PET) and therefore cannot observe a duplicate
+    theory stanza.  The first Dune-owned operation, ``list_files``, loads the
+    selected rules and is the operation that must report this configuration
+    error.  Keeping the case at that boundary prevents the oracle from
+    smuggling eager project indexing back into the protocol.
+    """
+    directory = ROOT / "traces/ambiguous_library/generated/dune_duplicate_theory"
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
-    catalog = {"declarations": [
-        {"name": "Demo.A.a", "statement": "Theorem a : True", "status": "Completed"},
-        {"name": "Demo.B.b", "statement": "Theorem b : True", "status": "Completed"},
-    ]}
     for record in records:
         axes = record["axes"]
         assert isinstance(axes, dict)
-        project = "project_coq" if axes["layout"] == "coqproject" else "project_dune"
-        start = command("start", {"project_path": project}, catalog)
-        events = [event("server_start"), event("user_connect", user="alice"), start]
+        failure = {
+            "kind": "invalid_configuration",
+            "message": "Dune rules failed: Error: Rocq theory Demo is defined twice:\n- theory Demo in a/dune:1\n- theory Demo in b/dune:1",
+        }
+        start = command("start", {"project_path": "project_dune"}, ATTACHED)
+        rules = command("list_files", {}, failure)
+        events = [
+            event("server_start"),
+            event("user_connect", user="alice"),
+            start,
+            rules,
+        ]
         if axes["lifecycle"] == "reconnect":
-            events.extend([event("user_disconnect", user="alice"), event("user_connect", user="alice"), start])
+            events.extend([
+                event("user_disconnect", user="alice"),
+                event("user_connect", user="alice"),
+                start,
+                rules,
+            ])
         elif axes["lifecycle"] == "restart":
-            events.extend([event("server_kill"), event("server_start"), event("user_connect", user="alice"), start])
-        events.extend([
-            command("declare", {"library": "Demo.New", "name": "truth", "statement": "True"}, {
-                "kind": "ambiguous", "message": "new logical library has ambiguous load paths",
-            }),
-            event("user_disconnect", user="alice"), event("server_kill"),
-        ])
+            events.extend([
+                event("server_kill"),
+                event("server_start"),
+                event("user_connect", user="alice"),
+                start,
+                rules,
+            ])
+        events.extend([event("user_disconnect", user="alice"), event("server_kill")])
         target = ROOT / str(record["trace"])
-        target.write_text("".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n" for item in events))
+        write_jsonl(target, events)
         record["implementation"] = "implemented"
 
 def materialize_declare_race_failures(records: list[dict[str, object]]) -> None:
@@ -317,54 +345,27 @@ def materialize_declare_race_failures(records: list[dict[str, object]]) -> None:
         assert isinstance(axes, dict)
         layout = str(axes["layout"])
         lifecycle = str(axes["lifecycle"])
-        project = "project_coq" if layout == "coqproject" else "project_dune"
-        library = "Race.Main" if layout == "coqproject" else "RaceDune.Main"
-        start = command("start", {"project_path": project}, {"declarations": [
-            {"name": f"{library}.seed", "statement": "Theorem seed : True", "status": "Completed"}
-        ]})
+        project = "project_dune"
+        library = "Race.Main"
+        start = command("start", {"project_path": project}, ATTACHED)
         events = [event("server_start"), event("user_connect", user="alice"), start]
         if lifecycle == "reconnect":
             events.extend([event("user_disconnect", user="alice"), event("user_connect", user="alice"), start])
         elif lifecycle == "restart":
             events.extend([event("server_kill"), event("server_start"), event("user_connect", user="alice"), start])
         events.extend([
-            command("declare", {"name": "fresh", "statement": "True", "kind": "Theorem"}, {
+            command("declare", {
+                "name": "fresh",
+                "statement": "True",
+                "kind": "Theorem",
+                "library": library,
+                "file": "theories/Main.v",
+            }, {
                 "kind": "declaration_changed", "message": "invalid PET request: declaration interface changed"
             }),
             event("user_disconnect", user="alice"),
             event("server_kill"),
         ])
         target = ROOT / str(record["trace"])
-        target.write_text("".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n" for item in events))
+        write_jsonl(target, events)
         record["implementation"] = "implemented"
-
-def materialize_declare_state_failures(records: list[dict[str, object]]) -> None:
-    """Block PET's disposable workspace after project selection, before declare."""
-    directory = ROOT / "traces/proof/generated/declare_state_unavailable"
-    if directory.exists():
-        shutil.rmtree(directory)
-    directory.mkdir(parents=True)
-    for record in records:
-        axes = record["axes"]
-        assert isinstance(axes, dict)
-        layout = str(axes["layout"])
-        lifecycle = str(axes["lifecycle"])
-        events = proof_lifecycle_prefix("project", lifecycle, layout)
-        events.extend([
-            command("declare", {"name": "fresh_state", "kind": "Theorem", "statement": "True"}, {
-                "kind": "invalid_configuration", "message": "PET workspace unavailable",
-            }),
-            event("user_disconnect", user="alice"),
-            event("server_kill"),
-        ])
-        target = ROOT / str(record["trace"])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n" for item in events))
-        record["implementation"] = "implemented"
-
-FILES_CATALOG = {
-    "declarations": [
-        {"name": f"Files.{name.upper()}.{name}", "statement": f"Theorem {name} : True", "status": "Open"}
-        for name in ("a", "b", "c")
-    ]
-}

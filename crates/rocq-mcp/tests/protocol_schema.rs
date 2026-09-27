@@ -3,13 +3,24 @@ use rocq_mcp::tool_definitions;
 use serde_json::Value;
 
 #[test]
-fn catalog_is_the_public_six_tool_contract() {
+fn catalog_is_the_public_ten_tool_contract() {
     let tools = tool_definitions();
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 10);
     let names: Vec<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
     assert_eq!(
         names,
-        vec!["start", "query", "declare", "prove", "check", "check_multi",]
+        vec![
+            "start",
+            "list_files",
+            "list_decls",
+            "query",
+            "declare",
+            "prove",
+            "abandon",
+            "check",
+            "try",
+            "rewind",
+        ]
     );
     for tool in tools {
         let value: Value = serde_json::to_value(tool).unwrap();
@@ -29,12 +40,29 @@ fn only_start_accepts_a_physical_project_path() {
         } else {
             assert!(!schema.contains("project_path"));
         }
-        for forbidden in ["cursor", "attempt", "workspace", "pet_pid", "file"] {
+        for forbidden in ["cursor", "attempt_id", "workspace", "pet_pid"] {
             assert!(
                 !schema.contains(forbidden),
                 "{forbidden} leaked in {}",
                 tool.name
             );
         }
+    }
+}
+
+#[test]
+fn file_ids_are_exposed_only_where_the_lazy_protocol_needs_them() {
+    for tool in tool_definitions() {
+        let schema = serde_json::to_value(tool).unwrap()["inputSchema"].to_string();
+        let accepts_file_id = matches!(
+            tool.name.as_ref(),
+            "list_decls" | "query" | "declare" | "prove" | "abandon"
+        );
+        assert_eq!(
+            schema.contains("\"file\""),
+            accepts_file_id,
+            "unexpected FileId exposure in {}",
+            tool.name
+        );
     }
 }

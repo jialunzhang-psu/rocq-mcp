@@ -123,7 +123,22 @@ fn validate_command(line: usize, command: &Command) -> Result<()> {
             message: "command.tool must be a non-empty string".into(),
         });
     }
-    const TOOLS: [&str; 6] = ["start", "query", "declare", "prove", "check", "check_multi"];
+    // Design note: this is the trace-language allowlist, not a second server
+    // dispatcher.  Keep it synchronized with the ten-tool public MCP
+    // contract so generated discovery/rewind traces are parsed before they
+    // reach an external server.
+    const TOOLS: [&str; 10] = [
+        "start",
+        "list_files",
+        "list_decls",
+        "query",
+        "declare",
+        "prove",
+        "abandon",
+        "check",
+        "try",
+        "rewind",
+    ];
     if !TOOLS.contains(&command.tool.as_str()) {
         return Err(TraceError::Parse {
             line,

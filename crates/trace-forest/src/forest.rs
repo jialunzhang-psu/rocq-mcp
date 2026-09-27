@@ -314,6 +314,34 @@ where
         }
     }
 
+    /// Returns the cursor for an ancestor retaining exactly `retained_actions`
+    /// actions from the root through `cursor`.
+    ///
+    /// The forest is immutable: this operation does not delete the selected
+    /// suffix or mutate any branch.  Callers can use the returned cursor as a
+    /// new selected prefix and append a separate branch from it.  Parent
+    /// traversal is kept here, rather than reconstructed by the engine, so
+    /// the trace forest remains the sole owner of topology and depth rules.
+    pub fn ancestor(&self, cursor: CursorId, retained_actions: usize) -> Result<CursorId, Error> {
+        let node = self.node(cursor)?;
+        match node.root.state()? {
+            RootState::Open => {}
+            RootState::Closing => return Err(Error::Closing),
+            RootState::Retired => return Err(Error::Retired),
+        }
+        if retained_actions > node.depth {
+            return Err(Error::PrefixOutOfRange);
+        }
+        let mut current_cursor = cursor;
+        let mut current = node;
+        while current.depth > retained_actions {
+            let parent = current.parent.ok_or(Error::PrefixOutOfRange)?;
+            current_cursor = parent;
+            current = self.node(parent)?;
+        }
+        Ok(current_cursor)
+    }
+
     /// Runs an exclusive per-root terminal effect.
     ///
     /// The effect receives an owned snapshot and never runs under a forest-wide

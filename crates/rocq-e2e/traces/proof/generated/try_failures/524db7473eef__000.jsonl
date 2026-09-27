@@ -1,0 +1,12 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_dune_project"}},"expected":{"attached":true}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"declaration":{"file":"theories/Main.v","qualified_path":["Matrix","Main","truth"]}}},"expected":{"theorem":"Matrix.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n","checkpoint":{"$checkpoint":true}}}
+{"event":"server_kill"}
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_dune_project"}},"expected":{"attached":true}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"declaration":{"file":"theories/Main.v","qualified_path":["Matrix","Main","truth"]}}},"expected":{"theorem":"Matrix.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n","checkpoint":{"$checkpoint":true}}}
+{"event":"command","user":"alice","command":{"tool":"try","args":{"attempts":["let rec loop n := loop n in loop 0."]}},"expected":{"attempts":[{"solved":false,"state":null,"error":{"kind":"proof_timeout","message":"PET operation timed out"}}]}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

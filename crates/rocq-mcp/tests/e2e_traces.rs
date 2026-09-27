@@ -30,9 +30,9 @@ async fn complete_declarative_trace_corpus() {
         assert_eq!(
             cases.len(),
             if cfg!(feature = "fault-injection") {
-                1_957
+                1_157
             } else {
-                1_915
+                1_118
             },
             "trace corpus changed; update the coverage manifest"
         );
@@ -43,9 +43,9 @@ async fn complete_declarative_trace_corpus() {
         assert_eq!(
             event_count,
             if cfg!(feature = "fault-injection") {
-                169_255
+                28_831
             } else {
-                168_689
+                28_290
             },
             "trace event corpus changed; update the coverage manifest"
         );

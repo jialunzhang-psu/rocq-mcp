@@ -56,12 +56,12 @@ fn every_implemented_case_maps_once_to_a_real_command_trace() {
 
     assert_eq!(
         implemented + unmapped + excluded.values().sum::<usize>(),
-        147_091
+        16_172
     );
-    assert_eq!(implemented, 146_977);
+    assert_eq!(implemented, 16_103);
     assert_eq!(unmapped, 0);
-    assert_eq!(excluded.values().sum::<usize>(), 114);
-    assert_eq!(excluded.len(), 8);
+    assert_eq!(excluded.values().sum::<usize>(), 69);
+    assert_eq!(excluded.len(), 7);
     assert!(implemented > 0);
     for (path, mapped_commands) in implemented_per_trace {
         assert!(
@@ -120,4 +120,55 @@ fn trace_shape(path: &Path) -> TraceShape {
         }
     }
     shape
+}
+
+#[test]
+fn generated_commands_have_no_legacy_name_only_declaration_arguments() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for group in std::fs::read_dir(root.join("traces")).unwrap() {
+        let group = group.unwrap();
+        if group.file_type().unwrap().is_dir() {
+            for path in walk_trace_files(&group.path()) {
+                let reader = rocq_e2e::open_trace(&path).unwrap();
+                for line in reader.lines() {
+                    let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
+                    if value["event"] != "command" {
+                        continue;
+                    }
+                    let args = &value["command"]["args"];
+                    assert!(
+                        args.get("theorem").is_none(),
+                        "legacy theorem in {}",
+                        path.display()
+                    );
+                    for field in ["target", "at"] {
+                        assert!(
+                            args.get(field).is_none()
+                                || args[field].is_null()
+                                || args[field].is_object(),
+                            "legacy string {field} in {}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn walk_trace_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            files.extend(walk_trace_files(&path));
+        } else if matches!(
+            path.extension().and_then(|x| x.to_str()),
+            Some("jsonl" | "zst")
+        ) {
+            files.push(path);
+        }
+    }
+    files
 }

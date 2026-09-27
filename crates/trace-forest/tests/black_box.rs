@@ -82,6 +82,44 @@ fn prefix_ordering_and_branching_are_immutable() {
 }
 
 #[test]
+fn ancestor_selects_a_prefix_without_pruning_other_branches() {
+    let directory = TempDir::new().unwrap();
+    let forest = forest(&directory, usize::MAX);
+    let root = open(&forest, "r");
+    let a = step(&forest, root, "a");
+    let ab = step(&forest, a, "b");
+    let abc = step(&forest, ab, "c");
+    let ax = step(&forest, a, "x");
+
+    assert_eq!(forest.ancestor(abc, 0).unwrap(), root);
+    assert_eq!(forest.ancestor(abc, 1).unwrap(), a);
+    assert_eq!(forest.ancestor(abc, 2).unwrap(), ab);
+    assert_eq!(forest.ancestor(abc, 3).unwrap(), abc);
+    assert!(matches!(
+        forest.ancestor(abc, 4),
+        Err(Error::PrefixOutOfRange)
+    ));
+
+    // Selecting `a` and appending a new edge does not remove either suffix.
+    assert_eq!(
+        forest
+            .step(a, action_key("y"), || Ok::<_, &'static str>(Action(
+                "y".into()
+            )))
+            .unwrap(),
+        step(&forest, a, "y")
+    );
+    assert_eq!(
+        forest.inspect(abc).unwrap().actions(),
+        &[Action("a".into()), Action("b".into()), Action("c".into())]
+    );
+    assert_eq!(
+        forest.inspect(ax).unwrap().actions(),
+        &[Action("a".into()), Action("x".into())]
+    );
+}
+
+#[test]
 fn canonical_keys_are_idempotent_and_suppress_following_callbacks() {
     let directory = TempDir::new().unwrap();
     let forest = forest(&directory, usize::MAX);

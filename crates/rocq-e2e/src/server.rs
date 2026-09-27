@@ -21,11 +21,15 @@ pub struct ServerConfig {
     pub working_dir: PathBuf,
     /// Maximum time allowed for the HTTP listener to become reachable.
     pub startup_timeout: Duration,
-    /// Maximum time allowed for one MCP connect, call, or disconnect.
+    /// Maximum time allowed for an MCP connection handshake or disconnect.
+    pub transport_timeout: Duration,
+    /// Optional fixture watchdog for one tool call.
     ///
-    /// A dead child can leave an HTTP future without a response; bounding this
-    /// wait is what makes process-death traces replayable instead of hanging.
-    pub request_timeout: Duration,
+    /// Normal calls have no harness deadline: a valid Dune build can take an
+    /// arbitrary amount of time, and engine-owned PET/Dune safety boundaries
+    /// report their own typed failures. Fault fixtures set this explicitly so
+    /// an intentionally dead child cannot leave the replay hanging.
+    pub call_timeout: Option<Duration>,
     environment: BTreeMap<OsString, OsString>,
 }
 
@@ -39,9 +43,8 @@ impl ServerConfig {
             // load shape. The deadline diagnoses a stuck child, not scheduler
             // latency while the host admits a full parallel batch.
             startup_timeout: Duration::from_secs(60),
-            // Must exceed the engine's normal operation timeout; individual
-            // fault tests can opt into a shorter deadline.
-            request_timeout: Duration::from_secs(60),
+            transport_timeout: Duration::from_secs(60),
+            call_timeout: None,
             environment: BTreeMap::new(),
         }
     }
@@ -59,9 +62,9 @@ impl ServerConfig {
         self
     }
 
-    /// Set the deadline used for each MCP operation in a replay.
-    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        self.request_timeout = timeout;
+    /// Set a fixture-only watchdog for each MCP tool call in a replay.
+    pub fn with_call_timeout(mut self, timeout: Duration) -> Self {
+        self.call_timeout = Some(timeout);
         self
     }
 }
@@ -90,8 +93,12 @@ impl ServerController {
         self.running.as_ref().map(|server| server.endpoint.as_str())
     }
 
-    pub(crate) fn request_timeout(&self) -> Duration {
-        self.config.request_timeout
+    pub(crate) fn transport_timeout(&self) -> Duration {
+        self.config.transport_timeout
+    }
+
+    pub(crate) fn call_timeout(&self) -> Option<Duration> {
+        self.config.call_timeout
     }
 
     /// Spawn the server and wait until its TCP listener accepts connections.
@@ -207,10 +214,16 @@ fn validate_config(config: &ServerConfig) -> Result<()> {
             message: "startup timeout must be positive".into(),
         });
     }
-    if config.request_timeout.is_zero() {
+    if config.transport_timeout.is_zero() {
         return Err(TraceError::InvalidConfiguration {
             path: config.executable.clone(),
-            message: "request timeout must be positive".into(),
+            message: "transport timeout must be positive".into(),
+        });
+    }
+    if config.call_timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Err(TraceError::InvalidConfiguration {
+            path: config.executable.clone(),
+            message: "call timeout must be positive".into(),
         });
     }
     Ok(())
@@ -221,4 +234,18 @@ fn reserve_loopback_address() -> std::io::Result<std::net::SocketAddr> {
     // reserve port zero only long enough to obtain an isolated loopback port.
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     listener.local_addr()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normal_calls_have_no_harness_deadline_but_faults_can_opt_in() {
+        let config = ServerConfig::new("server", "state");
+        assert_eq!(config.call_timeout, None);
+        let config = config.with_call_timeout(Duration::from_secs(3));
+        assert_eq!(config.call_timeout, Some(Duration::from_secs(3)));
+        assert_eq!(config.transport_timeout, Duration::from_secs(60));
+    }
 }

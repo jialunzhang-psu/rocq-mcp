@@ -19,15 +19,15 @@ impl UserConnection {
         endpoint: &str,
         line: usize,
         user: &str,
-        request_timeout: Duration,
+        transport_timeout: Duration,
     ) -> Result<Self> {
         let transport = StreamableHttpClientTransport::from_uri(endpoint);
-        let service = timeout(request_timeout, ().serve(transport))
+        let service = timeout(transport_timeout, ().serve(transport))
             .await
             .map_err(|_| TraceError::Transport {
                 line,
                 user: user.into(),
-                message: format!("connect timed out after {request_timeout:?}"),
+                message: format!("connect timed out after {transport_timeout:?}"),
             })?
             .map_err(|error| TraceError::Transport {
                 line,
@@ -43,21 +43,24 @@ impl UserConnection {
         command: &Command,
         line: usize,
         user: &str,
-        request_timeout: Duration,
+        call_timeout: Option<Duration>,
     ) -> Result<Value> {
-        let result = timeout(
-            request_timeout,
-            self.service.call_tool(
-                CallToolRequestParams::new(command.tool.clone())
-                    .with_arguments(command.args.clone()),
-            ),
-        )
-        .await
-        .map_err(|_| TraceError::Transport {
-            line,
-            user: user.into(),
-            message: format!("tool call timed out after {request_timeout:?}"),
-        })?
+        let call = self.service.call_tool(
+            CallToolRequestParams::new(command.tool.clone()).with_arguments(command.args.clone()),
+        );
+        // Design note: only explicit fault fixtures wrap a call in a harness
+        // timeout. Applying a default here would silently restore the native
+        // build deadline that the production engine deliberately omits.
+        let result = match call_timeout {
+            Some(limit) => timeout(limit, call)
+                .await
+                .map_err(|_| TraceError::Transport {
+                    line,
+                    user: user.into(),
+                    message: format!("tool call timed out after {limit:?}"),
+                })?,
+            None => call.await,
+        }
         .map_err(|error| TraceError::Transport {
             line,
             user: user.into(),
@@ -70,14 +73,14 @@ impl UserConnection {
         self,
         line: usize,
         user: &str,
-        request_timeout: Duration,
+        transport_timeout: Duration,
     ) -> Result<()> {
-        timeout(request_timeout, self.service.cancel())
+        timeout(transport_timeout, self.service.cancel())
             .await
             .map_err(|_| TraceError::Transport {
                 line,
                 user: user.into(),
-                message: format!("disconnect timed out after {request_timeout:?}"),
+                message: format!("disconnect timed out after {transport_timeout:?}"),
             })?
             .map(|_| ())
             .map_err(|error| TraceError::Transport {

@@ -15,7 +15,6 @@ serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 tempfile = "3"
-walkdir = "2"
 fs2 = "0.4"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"

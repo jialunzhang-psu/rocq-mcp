@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
-if [ "${ROCQ_E2E_ENABLE_BUILD_TIMEOUT:-0}" = 1 ] && [ "${1:-}" = dep ] && [ ! -e "$ROCQ_E2E_TIMEOUT_MARKER" ]; then
+# Dune metadata discovery legitimately invokes `rocq dep`.  Delay only the
+# native compile action so the fixture tests publication timeout rather than
+# accidentally turning project discovery into a timeout.
+if [ "${ROCQ_E2E_ENABLE_BUILD_TIMEOUT:-0}" = 1 ] && [ "${1:-}" = compile ] && [ ! -e "$ROCQ_E2E_TIMEOUT_MARKER" ]; then
   : > "$ROCQ_E2E_TIMEOUT_MARKER"
   sleep 30
   exit 0

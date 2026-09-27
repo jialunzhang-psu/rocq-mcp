@@ -31,16 +31,7 @@ pub fn attach_hooks(
                     operation: "configure declaration-race fixture socket",
                     source,
                 })?;
-            let source = if trace
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("")
-                .starts_with("dune__")
-            {
-                lab.join("project_dune/theories/Main.v")
-            } else {
-                lab.join("project_coq/Main.v")
-            };
+            let source = lab.join("project_dune/theories/Main.v");
             // Design note: the listener exists before the public command starts;
             // the worker changes only copied source and cannot wait indefinitely.
             let worker = thread::spawn(move || -> std::io::Result<()> {
@@ -96,36 +87,6 @@ pub fn attach_hooks(
             path: lab.to_path_buf(),
             message: "declaration-race fixture requires Unix".into(),
         });
-    } else if fixture == "proof"
-        && trace
-            .to_string_lossy()
-            .contains("/declare_state_unavailable/")
-    {
-        let lab = lab.to_path_buf();
-        let lifecycle = trace
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .and_then(|value| value.split("__").nth(1))
-            .unwrap_or("")
-            .to_owned();
-        let target_starts = if lifecycle == "connected" { 1 } else { 2 };
-        let mut starts = 0usize;
-        runner = runner.with_after_event_hook(move |_line, event| {
-            if let Event::Command { command, .. } = event
-                && command.tool == "start"
-            {
-                starts += 1;
-                if starts == target_starts {
-                    fs::write(lab.join("state/pet-workspaces"), b"blocked").map_err(|source| {
-                        rocq_e2e::TraceError::Io {
-                            operation: "block disposable PET workspace directory",
-                            source,
-                        }
-                    })?;
-                }
-            }
-            Ok(())
-        });
     } else if fixture == "basic"
         && trace
             .to_string_lossy()
@@ -143,8 +104,7 @@ pub fn attach_hooks(
                         .and_then(|value| value.as_str())
                     {
                         Some("missing-project") => failure = Some("project_unavailable"),
-                        Some("malformed_coqproject") => failure = Some("layout_invalid"),
-                        Some("ambiguous_project") => failure = Some("layout_ambiguous"),
+                        Some("malformed_dune") => failure = Some("layout_invalid"),
                         Some("project") if failure.is_some() => armed = true,
                         _ => {}
                     }
@@ -155,9 +115,8 @@ pub fn attach_hooks(
                         Some("project_unavailable") => {
                             fs::rename(&project, lab.join("removed_project"))
                         }
-                        Some("layout_invalid") => fs::write(project.join("_CoqProject"), "-Q\n"),
-                        Some("layout_ambiguous") => {
-                            fs::write(project.join("_CoqProject"), "-Q . One\n-Q . Two\n")
+                        Some("layout_invalid") => {
+                            fs::write(project.join("dune"), "(rocq.theory (name Demo)\n")
                         }
                         _ => unreachable!("armed fixture must know its failure"),
                     };
@@ -174,38 +133,25 @@ pub fn attach_hooks(
         });
     } else if fixture == "axiom_injection" {
         let lab = lab.to_path_buf();
-        let mut project = None::<String>;
         runner = runner.with_after_event_hook(move |_line, event| {
             let Event::Command { command, .. } = event else {
                 return Ok(());
             };
-            if command.tool == "start" {
-                project = command
-                    .args
-                    .get("project_path")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned);
-            } else if command.tool == "declare" {
-                // Arm only after the public declaration is open. The wrapper
-                // fires later, during the candidate's load-path capture.
-                fs::write(lab.join("axiom-inject.armed"), b"").map_err(|source| {
-                    rocq_e2e::TraceError::Io {
-                        operation: "arm post-baseline axiom injection",
-                        source,
-                    }
+            if command.tool == "declare" {
+                let source_path = lab.join("project_dune/theories/Main.v");
+                // The declaration has already frozen its PET-derived trust
+                // baseline. Mutate the disposable source directly; no native
+                // command-name hook or legacy load-path call is involved.
+                fs::write(
+                    source_path,
+                    "Axiom witness : True.\nTheorem seed : True. Proof. exact I. Qed.\n",
+                )
+                .map_err(|source| rocq_e2e::TraceError::Io {
+                    operation: "inject post-baseline axiom",
+                    source,
                 })?;
             } else if command.tool == "check" {
-                let Some(selected) = project.as_deref() else {
-                    return Err(rocq_e2e::TraceError::InvalidConfiguration {
-                        path: lab.clone(),
-                        message: "axiom fixture has no selected project".into(),
-                    });
-                };
-                let source_path = if selected == "project_dune" {
-                    lab.join(selected).join("theories/Main.v")
-                } else {
-                    lab.join(selected).join("Main.v")
-                };
+                let source_path = lab.join("project_dune/theories/Main.v");
                 fs::write(
                     source_path,
                     "Definition witness : True := I.\nTheorem seed : True. Proof. exact I. Qed.\n",
@@ -219,42 +165,41 @@ pub fn attach_hooks(
         });
     } else if fixture == "declaration_change" {
         let lab = lab.to_path_buf();
-        let mut project = None::<String>;
         runner = runner.with_after_event_hook(move |_line, event| {
             let Event::Command { command, .. } = event else {
                 return Ok(());
             };
-            if command.tool == "start" {
-                project = command
-                    .args
-                    .get("project_path")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned);
-            } else if command.tool == "prove" {
-                let (file, source) =
-                    match command.args.get("theorem").and_then(|value| value.as_str()) {
-                        Some("t") => ("A.v", "Theorem t : False. Admitted.\n"),
-                        Some("l") => ("B.v", "Lemma l : False. Admitted.\n"),
-                        Some("d") => ("C.v", "Definition d : False. Admitted.\n"),
-                        _ => {
-                            return Err(rocq_e2e::TraceError::InvalidConfiguration {
-                                path: lab.clone(),
-                                message: "declaration-change fixture has unknown proof target"
-                                    .into(),
-                            });
-                        }
-                    };
-                let Some(selected) = project.as_deref() else {
-                    return Err(rocq_e2e::TraceError::InvalidConfiguration {
-                        path: lab.clone(),
-                        message: "declaration-change fixture has no selected project".into(),
-                    });
+            if command.tool == "prove" {
+                let declaration = command.args.get("declaration");
+                let file = declaration
+                    .and_then(|value| value.get("file"))
+                    .and_then(|value| value.as_str());
+                let leaf = declaration
+                    .and_then(|value| value.get("qualified_path"))
+                    .and_then(|value| value.as_array())
+                    .and_then(|path| path.last())
+                    .and_then(|value| value.as_str());
+                let (file, source) = match (file, leaf) {
+                    (Some("theories/A.v"), Some("t")) => {
+                        ("theories/A.v", "Theorem t : False. Admitted.\n")
+                    }
+                    (Some("theories/B.v"), Some("l")) => {
+                        ("theories/B.v", "Lemma l : False. Admitted.\n")
+                    }
+                    (Some("theories/C.v"), Some("d")) => {
+                        ("theories/C.v", "Definition d : False. Admitted.\n")
+                    }
+                    _ => {
+                        return Err(rocq_e2e::TraceError::InvalidConfiguration {
+                            path: lab.clone(),
+                            message: "declaration-change fixture has unknown proof target".into(),
+                        });
+                    }
                 };
-                let source_path = if selected == "project_dune" {
-                    lab.join(selected).join("theories").join(file)
-                } else {
-                    lab.join(selected).join(file)
-                };
+                // Design note: the mutation follows the exact structured
+                // DeclarationId used by the public request. The fixture must
+                // not revive the removed name-only `theorem` protocol.
+                let source_path = lab.join("project_dune").join(file);
                 // Design note: mutation follows a successful public `prove`
                 // response, so `check` must reject the old declaration view.
                 fs::write(&source_path, source).map_err(|source| rocq_e2e::TraceError::Io {
@@ -264,6 +209,44 @@ pub fn attach_hooks(
             }
             Ok(())
         });
+    } else if fixture == "pet_timeout" {
+        let source = fs::read_to_string(trace).map_err(|source| rocq_e2e::TraceError::Io {
+            operation: "read PET-timeout trace",
+            source,
+        })?;
+        let timeout_lines = source
+            .lines()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .filter(|event| event.get("expected").is_some_and(contains_proof_timeout))
+                    .map(|_| index + 1)
+            })
+            .collect::<Vec<_>>();
+        if timeout_lines.len() > 1 || timeout_lines.first() == Some(&1) {
+            return Err(rocq_e2e::TraceError::InvalidConfiguration {
+                path: trace.to_path_buf(),
+                message: "PET-timeout trace must contain one armable timeout command".into(),
+            });
+        }
+        if let Some(timeout_line) = timeout_lines.first().copied() {
+            let arm_after = timeout_line - 1;
+            let marker = lab.join("pet-timeout.arm");
+            // Design note: fault activation follows the exact successful event
+            // immediately before the command whose public oracle is a timeout.
+            // It is independent of how many disposable/cached PET processes
+            // setup happened to require.
+            runner = runner.with_after_event_hook(move |line, _event| {
+                if line == arm_after {
+                    fs::write(&marker, b"armed").map_err(|source| rocq_e2e::TraceError::Io {
+                        operation: "arm PET-timeout fixture",
+                        source,
+                    })?;
+                }
+                Ok(())
+            });
+        }
     } else if fixture == "source_change" {
         let stem = trace
             .file_stem()
@@ -278,7 +261,7 @@ pub fn attach_hooks(
             change.as_str(),
             "query_invalid_configuration"
                 | "prove_invalid_configuration"
-                | "check_multi_invalid_configuration"
+                | "try_invalid_configuration"
                 | "check_publication_invalid_configuration"
         ) {
             let lifecycle = if change == "check_publication_invalid_configuration" {
@@ -289,15 +272,8 @@ pub fn attach_hooks(
                 recovery.as_str()
             };
             let target_starts = if lifecycle == "connected" { 1 } else { 2 };
-            let (config_path, invalid_content) =
-                if change == "check_publication_invalid_configuration" && recovery == "dune" {
-                    (
-                        lab.join("project_config_dune/theories/dune"),
-                        "(rocq.theory (name Demo)\n",
-                    )
-                } else {
-                    (lab.join("project_config/_CoqProject"), "-Q\n")
-                };
+            let config_path = lab.join("project_config_dune/theories/dune");
+            let invalid_content = "(rocq.theory (name Demo)\n";
             let mut starts = 0usize;
             let mut changed = false;
             runner = runner.with_after_event_hook(move |_line, event| {
@@ -307,7 +283,7 @@ pub fn attach_hooks(
                     }
                     let ready = if change == "check_publication_invalid_configuration" {
                         command.tool == "declare" && starts == target_starts
-                    } else if change == "check_multi_invalid_configuration"
+                    } else if change == "try_invalid_configuration"
                         || (change == "query_invalid_configuration" && candidate_or_kind == "goals")
                     {
                         command.tool == "prove" && starts == target_starts
@@ -328,45 +304,23 @@ pub fn attach_hooks(
                 }
                 Ok(())
             });
-        } else if matches!(recovery.as_str(), "same_connection" | "reconnect")
-            || (change == "dune_modules" && candidate_or_kind == "solved_pending")
-            || (change == "configuration_changed" && candidate_or_kind == "solved_pending")
-        {
+        } else if matches!(recovery.as_str(), "same_connection" | "reconnect") {
             let working_dir = lab.to_path_buf();
             let marker = lab.join("server-start.count");
             let real_mcp = production_server.to_path_buf();
             let mut phase = 0usize;
             let mut starts = 0usize;
-            let mut armed = false;
             runner = runner.with_after_event_hook(move |line, event| {
-                if let Event::Command { command, .. } = event {
-                    if command.tool == "start" {
-                        starts += 1;
-                    }
-                    if change == "dune_modules"
-                        && candidate_or_kind == "solved_pending"
-                        && command.tool == "prove"
-                        && !armed
-                    {
-                        fs::write(working_dir.join("dune-timeout.arm"), b"").map_err(|source| {
-                            rocq_e2e::TraceError::Io {
-                                operation: "arm Dune publication timeout fixture",
-                                source,
-                            }
-                        })?;
-                        armed = true;
-                    }
+                if let Event::Command { command, .. } = event
+                    && command.tool == "start"
+                {
+                    starts += 1;
                 }
                 let mutate = match event {
                     Event::Command { command, .. }
                         if recovery == "same_connection"
                             && phase == 0
-                            && command.tool
-                                == if candidate_or_kind == "solved_pending" {
-                                    "check"
-                                } else {
-                                    "prove"
-                                } =>
+                            && command.tool == "prove" =>
                     {
                         true
                     }
@@ -401,79 +355,23 @@ pub fn attach_hooks(
                     }
                     phase += 1;
                 }
-                if change == "configuration_changed"
-                    && candidate_or_kind == "solved_pending"
-                    && let Event::Command { command, .. } = event
-                {
-                    let restore =
-                        (recovery == "same_connection" && phase == 1 && command.tool == "prove")
-                            || (recovery != "same_connection"
-                                && command.tool == "start"
-                                && starts == 2);
-                    if restore {
-                        fs::write(
-                            working_dir.join("project_config/_CoqProject"),
-                            "-Q . Demo\n",
-                        )
-                        .map_err(|source| rocq_e2e::TraceError::Io {
-                            operation: "restore e2e project configuration",
-                            source,
-                        })?;
-                        phase = 2;
-                    }
-                }
-                Ok(())
-            });
-        }
-    } else if fixture == "toolchain_change" {
-        let stem = trace
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        let mut parts = stem.split("__");
-        let change = parts.next().unwrap_or("");
-        let candidate = parts.next().unwrap_or("").to_owned();
-        let recovery = parts.next().unwrap_or("").to_owned();
-        if matches!(recovery.as_str(), "same_connection" | "reconnect") {
-            let executable = if change == "rocq_identity_changed" {
-                "rocq"
-            } else {
-                "pet"
-            };
-            let path = lab.join("bin").join(executable);
-            let mut changed = false;
-            runner = runner.with_after_event_hook(move |_line, event| {
-                let trigger = match event {
-                    Event::Command { command, .. } if recovery == "same_connection" => {
-                        command.tool
-                            == if candidate == "solved_pending" {
-                                "check"
-                            } else {
-                                "prove"
-                            }
-                    }
-                    Event::UserDisconnect { .. } if recovery == "reconnect" => true,
-                    _ => false,
-                };
-                if trigger && !changed {
-                    let mut file =
-                        fs::OpenOptions::new()
-                            .append(true)
-                            .open(&path)
-                            .map_err(|source| rocq_e2e::TraceError::Io {
-                                operation: "open fixture executable for identity change",
-                                source,
-                            })?;
-                    file.write_all(b"\n# fixture identity changed\n")
-                        .map_err(|source| rocq_e2e::TraceError::Io {
-                            operation: "change fixture executable identity",
-                            source,
-                        })?;
-                    changed = true;
-                }
                 Ok(())
             });
         }
     }
     Ok(runner)
+}
+
+/// Whether one expected response contains the typed timeout at any envelope
+/// depth. `check.rejected`, try results, and top-level errors all use this
+/// same fixture oracle.
+fn contains_proof_timeout(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.get("kind").and_then(serde_json::Value::as_str) == Some("proof_timeout")
+                || object.values().any(contains_proof_timeout)
+        }
+        serde_json::Value::Array(values) => values.iter().any(contains_proof_timeout),
+        _ => false,
+    }
 }

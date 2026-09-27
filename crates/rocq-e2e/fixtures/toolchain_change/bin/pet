@@ -1,3 +1,0 @@
-#!/bin/sh
-set -eu
-exec "$ROCQ_E2E_REAL_PET" "$@"

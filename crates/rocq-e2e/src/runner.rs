@@ -133,7 +133,7 @@ impl TraceRunner {
             }
             Self::execute_parallel(
                 &self.users,
-                self.server.request_timeout(),
+                self.server.call_timeout(),
                 first_line,
                 &first,
                 line,
@@ -178,7 +178,7 @@ impl TraceRunner {
                     message: format!("user '{}' is not connected", user.as_str()),
                 })?;
                 let actual = connection
-                    .call(command, line, user.as_str(), self.server.request_timeout())
+                    .call(command, line, user.as_str(), self.server.call_timeout())
                     .await;
                 if expected == &serde_json::json!({"$transport":"lost"}) {
                     match actual {
@@ -207,7 +207,7 @@ impl TraceRunner {
     /// user wins a legitimate race.
     async fn execute_parallel(
         users: &HashMap<UserId, UserConnection>,
-        timeout: std::time::Duration,
+        call_timeout: Option<std::time::Duration>,
         first_line: usize,
         first: &Event,
         second_line: usize,
@@ -245,8 +245,8 @@ impl TraceRunner {
             message: format!("user '{}' is not connected", user_b.as_str()),
         })?;
         let (actual_a, actual_b) = tokio::join!(
-            connection_a.call(command_a, first_line, user_a.as_str(), timeout),
-            connection_b.call(command_b, second_line, user_b.as_str(), timeout),
+            connection_a.call(command_a, first_line, user_a.as_str(), call_timeout),
+            connection_b.call(command_b, second_line, user_b.as_str(), call_timeout),
         );
         let actual_a = actual_a?;
         let actual_b = actual_b?;
@@ -283,9 +283,13 @@ impl TraceRunner {
                 line,
                 message: "server is not running".into(),
             })?;
-        let connection =
-            UserConnection::connect(endpoint, line, user.as_str(), self.server.request_timeout())
-                .await?;
+        let connection = UserConnection::connect(
+            endpoint,
+            line,
+            user.as_str(),
+            self.server.transport_timeout(),
+        )
+        .await?;
         self.users.insert(user.clone(), connection);
         Ok(())
     }
@@ -299,7 +303,7 @@ impl TraceRunner {
                 message: format!("user '{}' is not connected", user.as_str()),
             })?;
         connection
-            .disconnect(line, user.as_str(), self.server.request_timeout())
+            .disconnect(line, user.as_str(), self.server.transport_timeout())
             .await
     }
 }

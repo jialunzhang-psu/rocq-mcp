@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 
-from .common import OPEN_TRUE, command, event
+from .common import ATTACHED, OPEN_TRUE, command, event, prove_args, write_jsonl
 from .matrix import ROOT
 
 
@@ -25,51 +24,43 @@ def materialize_publication_fault(records: list[dict[str, object]]) -> None:
         multi = axes["replacement"] == "multi_file"
         project = "project_multi" if multi else "project_single"
         theorem = "Demo.Fresh.truth" if multi else "Demo.Main.truth"
-        seed = {"name": "Demo.Main.seed", "statement": "Theorem seed : True", "status": "Completed"}
-        recovered = {"name": theorem, "statement": "Theorem truth : True", "status": "Completed"}
-        initial_catalog = {"declarations": [seed]}
         # Before metadata replacement, discovery sees only Main and appends
         # the durable Fresh record. Once both source and Dune metadata are
         # replaced, path-order discovery finds Fresh before Main.
-        metadata_replaced = axes["point"] in {"after_replace", "after_final_build", "before_ack"}
-        recovered_order = [recovered, seed] if multi and metadata_replaced else [seed, recovered]
-        recovered_catalog = {"declarations": recovered_order}
         declared = {**OPEN_TRUE, "theorem": theorem, "statement": "Theorem truth : True"}
         completed = {**declared, "status": "Completed", "goals": ""}
-        args = {"name": "truth", "statement": "True"}
-        if multi:
-            args["library"] = "Demo.Fresh"
+        args = {"name": "truth", "statement": "True", "kind": "Theorem", "library": "Demo.Fresh" if multi else "Demo.Main", "file": "theories/Fresh.v" if multi else "Main.v"}
         events = [
             event("server_start"),
             event("user_connect", user="alice"),
-            command("start", {"project_path": project}, initial_catalog),
+            command("start", {"project_path": project}, ATTACHED),
             command("declare", args, declared),
-            command("check", {"commands": "exact I."}, {"$transport": "lost"}),
+            command("check", {"attempts": ["exact I."]}, {"$transport": "lost"}),
             event("server_kill"),
             event("server_start"),
             event("user_connect", user="alice"),
-            command("start", {"project_path": project}, recovered_catalog),
+            command("start", {"project_path": project}, ATTACHED),
         ]
         recovery = axes["recovery"]
         if recovery == "reconnect_retry":
             events.extend([
                 event("user_disconnect", user="alice"),
                 event("user_connect", user="alice"),
-                command("start", {"project_path": project}, recovered_catalog),
+                command("start", {"project_path": project}, ATTACHED),
             ])
         elif recovery == "restart_retry":
             events.extend([
                 event("server_kill"),
                 event("server_start"),
                 event("user_connect", user="alice"),
-                command("start", {"project_path": project}, recovered_catalog),
+                command("start", {"project_path": project}, ATTACHED),
             ])
         events.extend([
-            command("prove", {"theorem": "truth"}, completed),
+            command("prove", prove_args(theorem, "theories/Fresh.v" if multi else "Main.v"), completed),
             event("user_disconnect", user="alice"),
             event("server_kill"),
         ])
         target = ROOT / str(record["trace"])
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n" for item in events))
+        write_jsonl(target, events)
         record["implementation"] = "implemented"

@@ -30,9 +30,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value.parse::<usize>())
         .transpose()?
         .unwrap_or(4);
+    let close_timeout = std::env::var("ROCQ_CLOSE_TIMEOUT_SECS")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .map(Duration::from_secs);
+    if close_timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Err("ROCQ_CLOSE_TIMEOUT_SECS must be positive".into());
+    }
     let engine = Arc::new(Engine::new(EngineConfig {
         state_parent: state,
         operation_timeout: Duration::from_secs(20),
+        close_timeout,
         // Design note: process capacity is a deployment resource limit, not an
         // MCP/session concern. Keeping it in process configuration lets a
         // one-process deployment exercise real eviction and replay semantics.

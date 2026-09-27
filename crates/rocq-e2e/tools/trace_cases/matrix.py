@@ -22,7 +22,10 @@ SELECTION = ("no_project", "project", "open", "completed")
 
 EXTRA = ("absent", "present")
 
-LAYOUT = ("coqproject", "dune")
+# Dune is the sole project/build authority. `_CoqProject` cases were removed
+# rather than retained as a compatibility path: the wrapper must fail closed
+# instead of silently activating a second source/layout implementation.
+LAYOUT = ("dune",)
 
 def product(family: str, **axes: tuple[str, ...]) -> list[dict[str, object]]:
     names = tuple(axes)
@@ -59,8 +62,6 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
                     "missing",
                     "regular_file",
                     "empty_directory",
-                    "ambiguous_layout",
-                    "malformed_coqproject",
                     "malformed_dune",
                 ),
                 "catalog": ("empty", "single", "mixed_status"),
@@ -73,8 +74,6 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
                 "failure": (
                     "project_unavailable",
                     "layout_invalid",
-                    "layout_ambiguous",
-                    "project_lock_timeout",
                 ),
                 "source": ("unchanged", "changed_while_disconnected"),
                 "lifecycle": LIFECYCLE,
@@ -83,11 +82,8 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
         (
             "search_valid",
             {
-                "name": ("missing", "Main", "duplicate", "done_true", "missing_name"),
-                "statement": ("missing", "True", "nat"),
-                "status": ("missing", "Open", "Completed", "Pending", "Rejected"),
-                "offset": ("zero", "one"),
-                "limit": ("one", "twenty"),
+                "pattern": ("missing", "true", "equality", "unknown"),
+                "at": ("missing", "open_true"),
                 "selection": SELECTION,
                 "lifecycle": LIFECYCLE,
             },
@@ -95,11 +91,8 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
         (
             "search_invalid",
             {
-                "name": ("missing", "wrong_type", "empty", "invalid"),
-                "statement": ("missing", "wrong_type", "empty", "invalid"),
-                "status": ("missing", "wrong_type", "empty", "invalid"),
-                "offset": ("missing", "wrong_type", "negative", "fractional"),
-                "limit": ("missing", "wrong_type", "zero", "over_max", "negative"),
+                "pattern": ("missing", "wrong_type", "empty", "multiple_sentences", "nul"),
+                "at": ("missing", "wrong_type", "empty", "invalid"),
                 "extra": EXTRA,
                 "selection": SELECTION,
                 "lifecycle": LIFECYCLE,
@@ -108,28 +101,8 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
         (
             "search_boundaries",
             {
-                "name": ("missing", "unicode", "at_limit", "over_limit"),
-                "statement": ("missing", "unicode", "at_limit", "over_limit"),
-                "status": ("missing", "exact", "lowercase", "unknown"),
-                "offset": (
-                    "missing",
-                    "zero",
-                    "one",
-                    "negative",
-                    "fractional",
-                    "string",
-                    "uint_max",
-                ),
-                "limit": (
-                    "missing",
-                    "one",
-                    "twenty",
-                    "hundred",
-                    "zero",
-                    "over_max",
-                    "fractional",
-                    "string",
-                ),
+                "pattern": ("missing", "unicode", "at_limit", "over_limit"),
+                "at": ("missing", "unicode", "over_limit"),
                 "extra": EXTRA,
                 "selection": SELECTION,
                 "lifecycle": LIFECYCLE,
@@ -174,14 +147,8 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
             {
                 "kind": ("statement", "proof", "definition", "assumptions", "dependencies"),
                 "target": (
-                    "open_short",
-                    "completed_short",
-                    "module_suffix",
                     "full_name",
                     "missing",
-                    "ambiguous",
-                    "pending",
-                    "rejected",
                 ),
                 "declaration_kind": ("Theorem", "Lemma", "Definition"),
                 "selection": SELECTION,
@@ -226,8 +193,6 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
                 ),
                 "failure": (
                     "not_found",
-                    "ambiguous",
-                    "declaration_changed",
                     "proof_timeout",
                     "project_timeout",
                     "invalid_configuration",
@@ -295,11 +260,14 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
                     "ambiguous_location",
                     "declaration_changed",
                     "logical_library_unavailable",
-                    "state_directory_unavailable",
                 ),
                 "layout": LAYOUT,
                 "lifecycle": LIFECYCLE,
             },
+        ),
+        (
+            "dune_duplicate_theory",
+            {"lifecycle": LIFECYCLE},
         ),
         (
             "prove",
@@ -309,15 +277,9 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
                     "null",
                     "wrong_type",
                     "empty",
-                    "open_short",
-                    "nested_suffix",
-                    "library_suffix",
                     "full_name",
                     "completed",
-                    "pending",
-                    "rejected",
                     "not_found",
-                    "ambiguous",
                     "invalid_syntax",
                     "at_limit",
                     "over_limit",
@@ -333,8 +295,6 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
             {
                 "failure": (
                     "not_found",
-                    "ambiguous",
-                    "declaration_changed",
                     "proof_timeout",
                     "project_timeout",
                     "invalid_configuration",
@@ -412,9 +372,8 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
                 "outcome": (
                     "open",
                     "completed",
-                    "pending_build_timeout",
-                    "rejected_unfinished_dependency",
-                    "rejected_axiom_out_of_scope",
+                    "build_timeout",
+                    "unfinished_dependency",
                     "declaration_changed",
                     "proof_timeout",
                     "project_timeout",
@@ -426,9 +385,9 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
             },
         ),
         (
-            "check_multi_parameters",
+            "try_parameters",
             {
-                "candidates": (
+                "attempts": (
                     "missing",
                     "null",
                     "wrong_container",
@@ -468,7 +427,7 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
             },
         ),
         (
-            "check_multi_order",
+            "try_order",
             {
                 "order": (
                     "unsolved_failed_solved",
@@ -484,7 +443,7 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
             },
         ),
         (
-            "check_multi_failures",
+            "try_failures",
             {
                 "failure": (
                     "declaration_changed",
@@ -537,17 +496,8 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
                     "source_deleted",
                     "source_restored",
                     "dune_modules",
-                    "load_path",
-                    "direct_vo_changed",
-                    "direct_vo_deleted",
-                    "transitive_vo_changed",
-                    "plugin_vo_changed",
-                    "rocq_identity_changed",
-                    "pet_identity_changed",
                     "configuration_changed",
-                    "axiom_after_baseline",
                 ),
-                "candidate": ("open", "solved_pending"),
                 "recovery": ("same_connection", "reconnect", "restart"),
             },
         ),
@@ -572,7 +522,8 @@ def matrices() -> list[tuple[str, dict[str, tuple[str, ...]]]]:
             {
                 "boundary": (
                     "same_theorem_double_close",
-                    "different_theorem_same_project_close",
+                    "different_theorem_same_file_close",
+                    "different_file_same_project_close",
                     "different_project_close",
                     "read_during_close",
                 ),
@@ -594,13 +545,14 @@ GROUP_AXES = {
     "declare_parameters": ("selection", "layout", "lifecycle"),
     "declare_boundaries": ("kind", "lifecycle"),
     "declare_failures": ("layout", "lifecycle"),
+    "dune_duplicate_theory": ("lifecycle",),
     "prove": ("selection", "runtime", "lifecycle"),
     "prove_failures": ("lifecycle",),
     "check": ("selection", "layout", "lifecycle"),
     "check_escaping_heads": ("selection", "lifecycle"),
-    "check_multi_parameters": ("selection", "lifecycle"),
-    "check_multi_order": ("selection", "lifecycle"),
-    "check_multi_failures": ("lifecycle",),
+    "try_parameters": ("selection", "lifecycle"),
+    "try_order": ("selection", "lifecycle"),
+    "try_failures": ("lifecycle",),
     "check_publication": ("outcome", "layout", "lifecycle"),
 }
 
@@ -626,14 +578,15 @@ FIXTURE = {
     "declare_parameters": "proof",
     "declare_boundaries": "proof",
     "declare_failures": "proof",
+    "dune_duplicate_theory": "ambiguous_library",
     "prove": "proof",
     "prove_failures": "basic",
     "check": "proof",
     "check_escaping_heads": "proof",
     "check_publication": "proof",
-    "check_multi_parameters": "proof",
-    "check_multi_order": "proof",
-    "check_multi_failures": "proof",
+    "try_parameters": "proof",
+    "try_order": "proof",
+    "try_failures": "proof",
     "two_users": "proof",
     "three_users": "proof",
     "environment_change": "source_change",
@@ -688,7 +641,7 @@ def assign_traces(family: str, records: list[dict[str, object]]) -> None:
         for record in records:
             axes = record["axes"]
             assert isinstance(axes, dict)
-            if axes["outcome"] == "pending_build_timeout":
+            if axes["outcome"] == "build_timeout":
                 record["trace"] = (
                     "traces/check_timeout/generated/check_publication/"
                     f"{record['case']}.jsonl"
@@ -698,11 +651,7 @@ def assign_traces(family: str, records: list[dict[str, object]]) -> None:
                 record["trace"] = str(record["trace"]).replace(
                     "traces/proof/", "traces/declaration_change/", 1
                 )
-            elif axes["outcome"] == "rejected_axiom_out_of_scope":
-                record["trace"] = str(record["trace"]).replace(
-                    "traces/proof/", "traces/axiom_injection/", 1
-                )
-            elif axes["outcome"] == "rejected_unfinished_dependency":
+            elif axes["outcome"] == "unfinished_dependency":
                 record["trace"] = str(record["trace"]).replace(
                     "traces/proof/", "traces/publication_rejected/", 1
                 )
@@ -713,76 +662,23 @@ def assign_traces(family: str, records: list[dict[str, object]]) -> None:
                     f"{axes['layout']}__{axes['lifecycle']}.jsonl"
                 )
                 record["case_index"] = 0
-    if family == "query_target":
-        status_groups: dict[tuple[str, str, str, str], list[dict[str, object]]] = {}
-        for record in records:
-            axes = record["axes"]
-            assert isinstance(axes, dict)
-            if axes["target"] in {"pending", "rejected"}:
-                key = (
-                    str(axes["target"]),
-                    str(axes["declaration_kind"]),
-                    str(axes["selection"]),
-                    str(axes["lifecycle"]),
-                )
-                status_groups.setdefault(key, []).append(record)
-        for key, members in status_groups.items():
-            status, declaration_kind, selection, lifecycle = key
-            fixture = "check_timeout" if status == "pending" else "query_rejected"
-            digest = hashlib.sha256("|".join(key).encode()).hexdigest()[:12]
-            for index, record in enumerate(members):
-                record["trace"] = (
-                    f"traces/{fixture}/generated/query_target_{status}/"
-                    f"{digest}.jsonl"
-                )
-                record["case_index"] = index
     if family == "prove":
         for record in records:
             axes = record["axes"]
             assert isinstance(axes, dict)
-            if axes["runtime"] == "alive" and axes["target"] in {
-                "pending",
-                "rejected",
-            }:
-                status = str(axes["target"])
-                fixture = "check_timeout" if status == "pending" else "query_rejected"
-                record["trace"] = (
-                    f"traces/{fixture}/generated/prove_{status}/"
-                    f"{record['case']}.jsonl"
-                )
-                record["case_index"] = 0
-            elif axes["runtime"] != "alive" and axes["target"] in {
-                "pending",
-                "rejected",
-            }:
-                runtime = str(axes["runtime"])
-                record["trace"] = (
-                    f"traces/status_runtime/generated/prove_{runtime}/"
-                    f"{record['case']}.jsonl"
-                )
-                record["case_index"] = 0
-            elif axes["runtime"] == "pet_killed" and axes["target"] not in {
-                "pending",
-                "rejected",
-            }:
+            if axes["runtime"] == "pet_killed":
                 record["trace"] = (
                     "traces/pet_fault/generated/prove_pet_killed/"
                     f"{record['case']}.jsonl"
                 )
                 record["case_index"] = 0
-            elif axes["runtime"] == "pet_evicted" and axes["target"] not in {
-                "pending",
-                "rejected",
-            }:
+            elif axes["runtime"] == "pet_evicted":
                 record["trace"] = (
                     "traces/pet_eviction/generated/prove_pet_evicted/"
                     f"{record['case']}.jsonl"
                 )
                 record["case_index"] = 0
-            elif axes["runtime"] == "proof_timeout" and axes["target"] not in {
-                "pending",
-                "rejected",
-            }:
+            elif axes["runtime"] == "proof_timeout":
                 group = f"{axes['selection']}_{axes['lifecycle']}"
                 record["trace"] = (
                     "traces/pet_timeout/generated/prove_proof_timeout/"
@@ -799,29 +695,10 @@ def assign_traces(family: str, records: list[dict[str, object]]) -> None:
                     f"{record['case']}.jsonl"
                 )
                 record["case_index"] = 0
-            elif axes["failure"] == "declaration_changed":
-                recovery = "same_connection" if axes["lifecycle"] == "connected" else axes["lifecycle"]
-                # Design note: one process trace witnesses both the environment
-                # transition and the public prove error, without duplicate labs.
-                record["trace"] = (
-                    "traces/source_change/generated/environment_change/"
-                    f"source_same_mtime__solved_pending__{recovery}.jsonl"
-                )
-                record["case_index"] = 1
             elif axes["failure"] == "invalid_configuration":
                 record["trace"] = (
                     "traces/source_change/generated/prove_failures/"
                     f"prove_invalid_configuration__{axes['lifecycle']}.jsonl"
-                )
-                record["case_index"] = 0
-    if family == "start_failures":
-        for record in records:
-            axes = record["axes"]
-            assert isinstance(axes, dict)
-            if axes["failure"] == "project_lock_timeout":
-                record["trace"] = (
-                    "traces/project_timeout/generated/start_failures/"
-                    f"{record['case']}.jsonl"
                 )
                 record["case_index"] = 0
     if family == "query_failures":
@@ -861,43 +738,35 @@ def assign_traces(family: str, records: list[dict[str, object]]) -> None:
         for record in records:
             axes = record["axes"]
             assert isinstance(axes, dict)
-            fixture = "toolchain_change" if axes["change"] in {
-                "rocq_identity_changed", "pet_identity_changed"
-            } else "source_change"
+            fixture = "source_change"
             record["trace"] = (
                 f"traces/{fixture}/generated/environment_change/"
-                f"{axes['change']}__{axes['candidate']}__{axes['recovery']}.jsonl"
+                f"{axes['change']}__open__{axes['recovery']}.jsonl"
             )
             record["case_index"] = 0
-    if family == "check_multi_failures":
+    if family == "try_failures":
         for record in records:
             axes = record["axes"]
             assert isinstance(axes, dict)
             if axes["failure"] == "invalid_configuration":
                 record["trace"] = (
-                    "traces/source_change/generated/check_multi_failures/"
-                    f"check_multi_invalid_configuration__{axes['lifecycle']}.jsonl"
+                    "traces/source_change/generated/try_failures/"
+                    f"try_invalid_configuration__{axes['lifecycle']}.jsonl"
                 )
                 record["case_index"] = 0
             elif axes["failure"] == "declaration_changed":
                 suffix = "" if axes["lifecycle"] == "connected" else f"__{axes['lifecycle']}"
                 change = "source_same_mtime_late" if axes["lifecycle"] == "restart" else "source_same_mtime"
                 record["trace"] = (
-                    "traces/source_change/generated/check_multi_failures/"
-                    f"{change}__open__same_connection__check_multi_failures{suffix}.jsonl"
+                    "traces/source_change/generated/try_failures/"
+                    f"{change}__open__same_connection__try_failures{suffix}.jsonl"
                 )
                 record["case_index"] = 0
     if family == "declare_failures":
         for record in records:
             axes = record["axes"]
             assert isinstance(axes, dict)
-            if axes["failure"] == "state_directory_unavailable":
-                record["trace"] = (
-                    "traces/proof/generated/declare_state_unavailable/"
-                    f"{axes['layout']}__{axes['lifecycle']}.jsonl"
-                )
-                record["case_index"] = 0
-            elif axes["failure"] == "declaration_changed":
+            if axes["failure"] == "declaration_changed":
                 record["trace"] = (
                     "traces/declare_race/generated/declare_failures/"
                     f"{axes['layout']}__{axes['lifecycle']}.jsonl"
@@ -918,7 +787,6 @@ def assign_traces(family: str, records: list[dict[str, object]]) -> None:
                 f"{axes['point']}__{axes['replacement']}__{axes['recovery']}.jsonl"
             )
             record["case_index"] = 0
-
 def check_case_needs_build_timeout_fixture(axes: dict[str, object]) -> bool:
     return (
         axes["commands"] == "build_timeout"

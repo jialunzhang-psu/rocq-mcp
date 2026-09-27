@@ -1,0 +1,6 @@
+{"event":"server_start"}
+{"event":"user_connect","user":"alice"}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_dune"}},"expected":{"attached":true}}
+{"event":"command","user":"alice","command":{"tool":"list_files","args":{}},"expected":{"kind":"invalid_configuration","message":"Dune rules failed: Error: Rocq theory Demo is defined twice:\n- theory Demo in a/dune:1\n- theory Demo in b/dune:1"}}
+{"event":"user_disconnect","user":"alice"}
+{"event":"server_kill"}

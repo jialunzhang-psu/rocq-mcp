@@ -12,35 +12,33 @@ from collections import Counter
 # Each reason is a falsifiable statement about the current public MCP route.
 REASONS = {
     "query_without_target": "This query kind has no target name to resolve.",
-    "query_without_proof_anchor": "This query kind does not compare a selected proof anchor with the current declaration.",
     "query_without_pet": "This query kind does not call PET, so it cannot time out in PET.",
     "attached_project_query": "A successful start retains project ownership; query reuses that attachment.",
     "attached_project_prove": "A successful start retains project ownership; prove reuses that attachment.",
     "attached_project_check": "Start and declare retain project ownership; check reuses that attachment.",
-    "attached_project_check_multi": "An active proof already owns the project attachment used by check_multi.",
-    "open_has_no_axiom_baseline": "An open proof has no solved candidate and therefore no frozen axiom baseline.",
+    "attached_project_try": "An active proof already owns the project attachment used by try.",
+    "dune_duplicate_theory_preempts_location": "Dune rejects duplicate Rocq theory names during workspace discovery, before declaration-location resolution is reachable.",
 }
 
 EXPECTED_COUNTS = {
-    "query_without_target": 24,
-    "query_without_proof_anchor": 24,
+    "query_without_target": 12,
     "query_without_pet": 12,
     "attached_project_query": 27,
     "attached_project_prove": 3,
-    "attached_project_check": 18,
-    "attached_project_check_multi": 3,
-    "open_has_no_axiom_baseline": 3,
+    "attached_project_check": 9,
+    "attached_project_try": 3,
+    "dune_duplicate_theory_preempts_location": 3,
 }
 
 
 def exclusion_code(family: str, axes: dict[str, object]) -> str | None:
     """Return the single audited reason for an unreachable public outcome."""
+    if family == "declare_failures" and axes["layout"] == "dune" and axes["failure"] == "ambiguous_location":
+        return "dune_duplicate_theory_preempts_location"
     if family == "query_failures":
         kind, failure = axes["kind"], axes["failure"]
         if failure in {"not_found", "ambiguous"} and kind in {"goals", "search", "type", "notations"}:
             return "query_without_target"
-        if failure == "declaration_changed" and kind != "goals":
-            return "query_without_proof_anchor"
         if failure == "proof_timeout" and kind in {"search", "statement", "proof", "definition"}:
             return "query_without_pet"
         if failure == "project_timeout":
@@ -49,15 +47,13 @@ def exclusion_code(family: str, axes: dict[str, object]) -> str | None:
         return "attached_project_prove"
     if family == "check_publication" and axes["outcome"] == "project_timeout":
         return "attached_project_check"
-    if family == "check_multi_failures" and axes["failure"] == "project_timeout":
-        return "attached_project_check_multi"
-    if family == "environment_change" and axes["change"] == "axiom_after_baseline" and axes["candidate"] == "open":
-        return "open_has_no_axiom_baseline"
+    if family == "try_failures" and axes["failure"] == "project_timeout":
+        return "attached_project_try"
     return None
 
 
 def mark_exclusions(records: list[dict[str, object]]) -> None:
-    """Classify exactly the remaining 114 unreachable rows; reject drift."""
+    """Classify exactly the audited unreachable rows; reject drift."""
     counts: Counter[str] = Counter()
     for record in records:
         axes = record["axes"]

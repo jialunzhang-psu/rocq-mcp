@@ -1,5 +1,5 @@
 #!/bin/sh
-if [ "$1" = "dep" ] && [ ! -e "$ROCQ_E2E_TIMEOUT_MARKER" ]; then
+if [ "$1" = "dep" ] && [ -e "$ROCQ_E2E_TIMEOUT_ARM_MARKER" ] && [ ! -e "$ROCQ_E2E_TIMEOUT_MARKER" ]; then
   : > "$ROCQ_E2E_TIMEOUT_MARKER"
   sleep 30
   exit 0

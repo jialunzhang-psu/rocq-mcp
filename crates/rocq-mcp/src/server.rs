@@ -2,6 +2,7 @@
 
 use crate::{
     adapter::{dispatch, public_error},
+    checkpoint::CheckpointBook,
     schema::tool_definitions,
 };
 use rmcp::{
@@ -25,10 +26,10 @@ use tokio::sync::Mutex as AsyncMutex;
 #[derive(Default)]
 pub(crate) struct Selection {
     pub(crate) project: Option<PathBuf>,
-    pub(crate) attempt: Option<AttemptId>,
+    pub(crate) checkpoints: CheckpointBook<AttemptId>,
 }
-/// One MCP connection's user-facing selection plus a private engine capability.
-/// The attempt id is never serialized or accepted from a client.
+/// One MCP connection's project and request-boundary selection.
+/// Engine attempt capabilities remain private values inside `CheckpointBook`.
 #[derive(Clone)]
 pub struct RocqServer {
     engine: Arc<Engine>,

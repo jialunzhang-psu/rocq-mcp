@@ -2,6 +2,6 @@
 {"event":"user_connect","user":"alice"}
 {"event":"user_disconnect","user":"alice"}
 {"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"missing"}},"expected":{"kind":"invalid_request","message":"call start first"}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"declaration":{"file":"Main.v","qualified_path":["missing"]}}},"expected":{"kind":"invalid_request","message":"call start first"}}
 {"event":"user_disconnect","user":"alice"}
 {"event":"server_kill"}

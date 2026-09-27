@@ -116,6 +116,8 @@ pub enum Error {
     Closing,
     /// A same-key callback failed in another concurrent request; retry it.
     ConcurrentPreparationFailed,
+    /// The requested trace prefix is deeper than the selected cursor.
+    PrefixOutOfRange,
     /// Generic payload encoding or decoding failed.
     PayloadCodec,
     /// A spill segment was unreadable for an operational reason.

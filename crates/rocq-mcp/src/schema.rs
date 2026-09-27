@@ -26,25 +26,31 @@ fn schema(p: Value, r: &[&str]) -> serde_json::Map<String, Value> {
         ("additionalProperties".to_owned(), Value::Bool(false)),
     ])
 }
-/// Return the process-wide immutable catalog of six public MCP tools.
+/// Return the process-wide immutable catalog of the public MCP tools.
 pub fn tool_definitions() -> &'static [Tool] {
     use std::sync::OnceLock;
     static T: OnceLock<Vec<Tool>> = OnceLock::new();
     T.get_or_init(|| {
         let s = json!({"type": "string", "minLength": 1});
+        let declaration_id = json!({
+            "type":"object",
+            "properties":{
+                "file":s,
+                "qualified_path":{"type":"array","items":s,"minItems":1}
+            },
+            "required":["file","qualified_path"],
+            "additionalProperties":false
+        });
         // Design note: a root-level oneOf is flattened incorrectly by some
         // tool-discovery clients, leaving only its first kind visible. Keep
         // the wire schema flat and enforce kind-specific fields in dispatch.
         let query_schema = schema(
             json!({
                 "kind": {"enum": ["goals", "search", "statement", "proof", "definition", "assumptions", "dependencies", "type", "notations"]},
-                "target": s,
+                "target": declaration_id,
+                "at": declaration_id,
                 "expression": s,
-                "name_contains": s,
-                "statement_pattern": s,
-                "status": {"enum": ["Open", "Completed", "Pending", "Rejected"]},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-                "offset": {"type": "integer", "minimum": 0},
+                "pattern": s,
             }),
             &["kind"],
         );
@@ -54,29 +60,65 @@ pub fn tool_definitions() -> &'static [Tool] {
                 schema(json!({"project_path":s}), &["project_path"]),
             ),
             (
+                "list_files",
+                schema(json!({}), &[]),
+            ),
+            (
+                "list_decls",
+                schema(json!({"file":s}), &["file"]),
+            ),
+            (
                 "query",
                 query_schema,
             ),
             (
                 "declare",
                 schema(
-                    json!({"name":s,"statement":s,"kind":s,"library":s}),
-                    &["name", "statement"],
+                    json!({"name":s,"statement":s,"kind":s,"library":s,"file":s}),
+                    &["name", "statement", "library", "file"],
                 ),
             ),
             (
                 "prove",
-                schema(json!({"theorem":s}), &["theorem"]),
+                schema(
+                    json!({"declaration":{
+                        "type":"object",
+                        "properties":{
+                            "file":s,
+                            "qualified_path":{"type":"array","items":s,"minItems":1}
+                        },
+                        "required":["file","qualified_path"],
+                        "additionalProperties":false
+                    }}),
+                    &["declaration"],
+                ),
+            ),
+            (
+                "abandon",
+                schema(json!({"declaration":declaration_id}), &["declaration"]),
             ),
             (
                 "check",
-                schema(json!({"commands":s}), &["commands"]),
+                schema(
+                    json!({"attempts":{"type":"array","items":s,"minItems":1,"maxItems":20}}),
+                    &["attempts"],
+                ),
             ),
             (
-                "check_multi",
+                "try",
                 schema(
-                    json!({"candidates":{"type":"array","items":s,"minItems":1,"maxItems":20}}),
-                    &["candidates"],
+                    json!({"attempts":{"type":"array","items":s,"minItems":1,"maxItems":20}}),
+                    &["attempts"],
+                ),
+            ),
+            (
+                "rewind",
+                schema(
+                    json!({
+                        "steps":{"type":"integer","minimum":1},
+                        "checkpoint":{"type":"integer","minimum":1}
+                    }),
+                    &[],
                 ),
             ),
         ];
@@ -84,7 +126,7 @@ pub fn tool_definitions() -> &'static [Tool] {
             .map(|(n, sc)| {
                 Tool::new(n, tool_description(n), sc).with_annotations(
                     ToolAnnotations::default()
-                        .read_only(n == "query" || n == "check_multi")
+                        .read_only(matches!(n, "query" | "try" | "list_files" | "list_decls"))
                         .open_world(false),
                 )
             })

@@ -1,58 +1,58 @@
 {"event":"server_start"}
 {"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_project"}},"expected":{"declarations":[{"name":"Matrix.Main.truth","statement":"Theorem truth : True","status":"Open"},{"name":"Matrix.Main.pair","statement":"Theorem pair : True /\\ True","status":"Open"},{"name":"Matrix.Main.refl_nat","statement":"Theorem refl_nat : forall n : nat, n = n","status":"Open"},{"name":"Matrix.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Matrix.Main.number","statement":"Definition number : nat","status":"Open"}]}}
-{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"done_true"}},"expected":{"theorem":"Matrix.Main.done_true","statement":"Theorem done_true : True","status":"Completed","goals":""}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_dune_project"}},"expected":{"attached":true}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"declaration":{"file":"theories/Main.v","qualified_path":["Matrix","Main","done_true"]}}},"expected":{"theorem":"Matrix.Main.done_true","statement":"Theorem done_true : True","status":"Completed","goals":""}}
 {"event":"user_disconnect","user":"alice"}
 {"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_project"}},"expected":{"declarations":[{"name":"Matrix.Main.truth","statement":"Theorem truth : True","status":"Open"},{"name":"Matrix.Main.pair","statement":"Theorem pair : True /\\ True","status":"Open"},{"name":"Matrix.Main.refl_nat","statement":"Theorem refl_nat : forall n : nat, n = n","status":"Open"},{"name":"Matrix.Main.done_true","statement":"Theorem done_true : True","status":"Completed"},{"name":"Matrix.Main.number","statement":"Definition number : nat","status":"Open"}]}}
-{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"done_true"}},"expected":{"theorem":"Matrix.Main.done_true","statement":"Theorem done_true : True","status":"Completed","goals":""}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Qed."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Qed.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Defined."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Defined.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Admitted."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Admitted.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Abort."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Abort.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Save escaped."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Save escaped.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Restart."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Restart.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Undo."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Undo.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Undo All."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Undo All.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Back."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Back.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Reset escaped."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Reset escaped.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Reset Initial."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Reset Initial.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Drop."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Drop.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Focus."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Focus.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Unfocus."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Unfocus.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Show."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Show.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Show Proof."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Show Proof.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Show Script."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Show Script.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Guarded."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Guarded.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Proof."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Proof.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Theorem escaped : True."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Theorem escaped : True.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Lemma escaped : True."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Lemma escaped : True.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Definition escaped : True."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Definition escaped : True.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Fixpoint escaped := 0."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"Fixpoint escaped := 0.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"CoFixpoint escaped : nat := 0."}},"expected":{"kind":"invalid_request","message":"call prove first"}}
-{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"CoFixpoint escaped : nat := 0.","extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_dune_project"}},"expected":{"attached":true}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"declaration":{"file":"theories/Main.v","qualified_path":["Matrix","Main","done_true"]}}},"expected":{"theorem":"Matrix.Main.done_true","statement":"Theorem done_true : True","status":"Completed","goals":""}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Qed."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Qed."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Defined."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Defined."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Admitted."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Admitted."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Abort."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Abort."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Save escaped."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Save escaped."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Restart."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Restart."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Undo."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Undo."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Undo All."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Undo All."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Back."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Back."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Reset escaped."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Reset escaped."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Reset Initial."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Reset Initial."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Drop."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Drop."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Focus."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Focus."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Unfocus."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Unfocus."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Show."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Show."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Show Proof."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Show Proof."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Show Script."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Show Script."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Guarded."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Guarded."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Proof."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Proof."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Theorem escaped : True."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Theorem escaped : True."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Lemma escaped : True."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Lemma escaped : True."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Definition escaped : True."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Definition escaped : True."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Fixpoint escaped := 0."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["Fixpoint escaped := 0."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["CoFixpoint escaped : nat := 0."]}},"expected":{"kind":"invalid_request","message":"call prove first"}}
+{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["CoFixpoint escaped : nat := 0."],"extra":true}},"expected":{"kind":"invalid_request","message":"unexpected field 'extra'"}}
 {"event":"user_disconnect","user":"alice"}
 {"event":"server_kill"}

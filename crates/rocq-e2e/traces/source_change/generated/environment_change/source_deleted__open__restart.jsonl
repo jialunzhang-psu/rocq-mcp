@@ -1,10 +1,10 @@
 {"event":"server_start"}
 {"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_delete"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
-{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_delete"}},"expected":{"attached":true}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"declaration":{"file":"Main.v","qualified_path":["Demo","Main","truth"]}}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n","checkpoint":{"$checkpoint":true}}}
 {"event":"server_kill"}
 {"event":"server_start"}
 {"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_delete"}},"expected":{"declarations":[]}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_delete"}},"expected":{"attached":true}}
 {"event":"user_disconnect","user":"alice"}
 {"event":"server_kill"}

@@ -5,14 +5,14 @@ from __future__ import annotations
 import argparse
 
 from .common import write_jsonl
+from .fault import materialize_publication_fault
 from .matrix import OUTPUT, ROOT, assign_traces, matrices, product
 from .feasibility import mark_exclusions
-from .fault import materialize_publication_fault
 from .simultaneous import materialize_simultaneous_requests
 from .start import environment_change_is_materialized, materialize_environment_change, materialize_start_failures, materialize_start_parameters, materialize_start_paths, start_failure_is_materialized
 from .query import materialize_query_expression, materialize_query_failures, materialize_search_boundaries, materialize_search_invalid, materialize_search_valid, query_failure_is_materialized
-from .check import check_case_is_materialized, check_multi_failure_is_materialized, check_publication_is_materialized, materialize_check, materialize_check_escaping_heads, materialize_check_multi_failures, materialize_check_multi_order, materialize_check_multi_parameters, materialize_check_publication
-from .declare import declare_failure_is_materialized, materialize_declare_boundaries, materialize_declare_failures, materialize_declare_parameters
+from .check import check_case_is_materialized, try_failure_is_materialized, check_publication_is_materialized, materialize_check, materialize_check_escaping_heads, materialize_try_failures, materialize_try_order, materialize_try_parameters, materialize_check_publication
+from .declare import declare_failure_is_materialized, materialize_declare_boundaries, materialize_declare_failures, materialize_declare_parameters, materialize_dune_duplicate_theory
 from .multiuser import materialize_three_users, materialize_two_users
 from .prove import materialize_prove, materialize_prove_failures, prove_failure_is_materialized
 from .target_query import materialize_query_kind, materialize_query_target
@@ -32,7 +32,7 @@ def mark_existing(family: str, records: list[dict[str, object]]) -> None:
         "declare_failures",
         "prove_failures",
         "query_failures",
-        "check_multi_failures",
+        "try_failures",
         "check_publication",
         "start_failures",
         "environment_change",
@@ -42,35 +42,26 @@ def mark_existing(family: str, records: list[dict[str, object]]) -> None:
         for record in records:
             axes = record["axes"]
             assert isinstance(axes, dict)
-            if family == "prove" and (
-                axes["runtime"] == "alive"
-                or (
-                    axes["runtime"] in {
-                        "pet_killed",
-                        "pet_evicted",
-                        "proof_timeout",
-                    }
-                    and axes["target"] not in {"pending", "rejected"}
-                )
-                or (
-                    axes["runtime"] in {"pet_killed", "pet_evicted", "proof_timeout"}
-                    and axes["target"] in {"pending", "rejected"}
-                )
-            ):
+            if family == "prove" and (ROOT / str(record["trace"])).is_file():
                 record["implementation"] = "implemented"
             elif family == "query_target":
                 record["implementation"] = "implemented"
             elif family == "check" and check_case_is_materialized(axes):
                 record["implementation"] = "implemented"
-            elif family == "declare_failures" and (declare_failure_is_materialized(axes)
-                                                   or (axes["failure"] in {"declaration_changed", "ambiguous_location"}
-                                                       and (ROOT / str(record["trace"])).is_file())):
+            elif family == "declare_failures" and (
+                declare_failure_is_materialized(axes)
+                or (
+                    axes["failure"]
+                    in {"declaration_changed"}
+                    and (ROOT / str(record["trace"])).is_file()
+                )
+            ):
                 record["implementation"] = "implemented"
             elif family == "prove_failures" and prove_failure_is_materialized(axes):
                 record["implementation"] = "implemented"
             elif family == "query_failures" and query_failure_is_materialized(axes):
                 record["implementation"] = "implemented"
-            elif family == "check_multi_failures" and check_multi_failure_is_materialized(
+            elif family == "try_failures" and try_failure_is_materialized(
                 axes
             ):
                 record["implementation"] = "implemented"
@@ -108,19 +99,20 @@ def main() -> None:
         "declare_parameters": materialize_declare_parameters,
         "declare_boundaries": materialize_declare_boundaries,
         "declare_failures": materialize_declare_failures,
+        "dune_duplicate_theory": materialize_dune_duplicate_theory,
         "check": materialize_check,
         "check_publication": materialize_check_publication,
-        "check_multi_parameters": materialize_check_multi_parameters,
-        "check_multi_order": materialize_check_multi_order,
-        "check_multi_failures": materialize_check_multi_failures,
+        "try_parameters": materialize_try_parameters,
+        "try_order": materialize_try_order,
+        "try_failures": materialize_try_failures,
         "check_escaping_heads": materialize_check_escaping_heads,
         "two_users": materialize_two_users,
         "three_users": materialize_three_users,
         "prove": materialize_prove,
         "prove_failures": materialize_prove_failures,
         "query_target": materialize_query_target,
-        "publication_fault": materialize_publication_fault,
         "simultaneous_requests": materialize_simultaneous_requests,
+        "publication_fault": materialize_publication_fault,
     }
     for family in selected or []:
         if family not in materializers:

@@ -4,8 +4,7 @@
 #![cfg(feature = "fault-injection")]
 
 use rocq_engine::{
-    DeclarationIdentity, DeclarationKind, Engine, EngineConfig, LogicalLibrary, NewDeclaration,
-    ProofLifecycle,
+    DeclarationIdentity, DeclarationKind, Engine, EngineConfig, FileId, ProofLifecycle,
 };
 use std::{env, fs, path::PathBuf, process::Command, time::Duration};
 use tempfile::TempDir;
@@ -13,27 +12,23 @@ use tempfile::TempDir;
 fn identity() -> DeclarationIdentity {
     if env::var_os("ROCQ_ENGINE_FAULT_MULTI").is_some() {
         return DeclarationIdentity {
-            library: LogicalLibrary(vec!["Demo".into(), "Fresh".into()]),
-            modules: vec![],
-            constant: "created".into(),
+            file: FileId("Fresh.v".into()),
+            qualified_path: vec!["Demo".into(), "Fresh".into(), "created".into()],
         };
     }
     DeclarationIdentity {
-        library: LogicalLibrary(vec!["Main".into(), "Main".into()]),
-        modules: vec![],
-        constant: "created".into(),
+        file: FileId("Main.v".into()),
+        qualified_path: vec!["Main".into(), "Main".into(), "created".into()],
     }
 }
-
 fn config(state: &std::path::Path) -> EngineConfig {
     EngineConfig {
         state_parent: state.to_owned(),
         operation_timeout: Duration::from_secs(20),
-        close_timeout: Duration::from_secs(20),
+        close_timeout: Some(Duration::from_secs(20)),
         ..EngineConfig::default()
     }
 }
-
 fn child_mode() -> bool {
     env::var_os("ROCQ_ENGINE_FAULT_CHILD").is_some()
 }
@@ -47,20 +42,16 @@ fn every_publication_fault_point_recovers_idempotently() {
         let opened = engine
             .declare(
                 &project,
-                NewDeclaration {
-                    kind: DeclarationKind::Theorem,
-                    identity: identity(),
-                    context: vec![],
-                    statement: "True".into(),
-                },
+                DeclarationKind::Theorem,
+                identity(),
+                "True".into(),
             )
             .unwrap();
         let attempt = opened.attempt.unwrap();
-        let result = engine.step(attempt, "exact I.");
+        let result = engine.check(attempt, &["exact I.".into()]);
         eprintln!("child step result: {result:?}");
         panic!("fault point did not abort");
     }
-
     for point in [
         "after_promote",
         "before_replace",
@@ -74,12 +65,12 @@ fn every_publication_fault_point_recovers_idempotently() {
         let state = dir.path().join("state");
         let multi = point == "between_replacements";
         fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("dune-project"),
+            "(lang dune 3.21)\n(using rocq 0.11)\n",
+        )
+        .unwrap();
         if multi {
-            fs::write(
-                project.join("dune-project"),
-                "(lang dune 3.21)\n(using rocq 0.11)\n",
-            )
-            .unwrap();
             fs::create_dir_all(project.join("theories")).unwrap();
             fs::write(
                 project.join("theories/dune"),
@@ -92,7 +83,7 @@ fn every_publication_fault_point_recovers_idempotently() {
             )
             .unwrap();
         } else {
-            fs::write(project.join("_CoqProject"), "-Q . Main\n").unwrap();
+            fs::write(project.join("dune"), "(rocq.theory (name Main))\n").unwrap();
             fs::write(project.join("Main.v"), "").unwrap();
         }
         let mut child = Command::new(env::current_exe().unwrap());
@@ -108,18 +99,15 @@ fn every_publication_fault_point_recovers_idempotently() {
         if multi {
             child.env("ROCQ_ENGINE_FAULT_MULTI", "1");
         }
-        let status = child.status().unwrap();
         assert!(
-            !status.success(),
+            !child.status().unwrap().success(),
             "fault point {point} did not terminate child"
         );
-
         let engine = Engine::new(config(&state)).unwrap();
         let target = if multi {
             DeclarationIdentity {
-                library: LogicalLibrary(vec!["Demo".into(), "Fresh".into()]),
-                modules: vec![],
-                constant: "created".into(),
+                file: FileId("Fresh.v".into()),
+                qualified_path: vec!["Demo".into(), "Fresh".into(), "created".into()],
             }
         } else {
             identity()

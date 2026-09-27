@@ -1,49 +1,40 @@
 # E2E matrix
 
-`tools/trace_cases/matrix.py` defines the Cartesian products and
-`TRACE_CASES.jsonl.zst` maps each case to a trace and command position. The
-runner invokes an external `rocq-mcp` process over MCP; engine unit tests do not
-count as E2E coverage.
+`tools/trace_cases/matrix.py` is the executable matrix definition and
+`TRACE_CASES.jsonl.zst` is its generated mapping. The matrix has one project
+authority: Dune. `_CoqProject` layouts and source/catalog status filters are not
+test dimensions because the wrapper no longer implements those semantics.
 
-| Family | Cases | Trace files |
-|---|---:|---:|
-| `start_parameters`, `start_paths`, `start_failures` | 363 | 42 |
-| `search_valid`, `search_invalid`, `search_boundaries` | 120,336 | 84 |
-| `query_kind`, `query_target`, `query_expression`, `query_failures` | 2,706 | 180 |
-| `declare_parameters`, `declare_boundaries`, `declare_failures` | 11,076 | 57 |
-| `prove`, `prove_failures` | 1,557 | 1,224 |
-| `check`, `check_escaping_heads`, `check_publication` | 9,954 | 186 |
-| `check_multi_parameters`, `check_multi_order`, `check_multi_failures` | 924 | 33 |
-| `two_users`, `three_users` | 51 | 51 |
-| `environment_change` | 84 | 84 |
-| `publication_fault`, `simultaneous_requests` | 40 | 40 |
-| **Total** | **147,091** | **1,981 family slots** |
+The current generated manifest contains **16,172 cases**, **69 explicit
+exclusions**, and **1,157 physical trace files** (the latter share many cases).
+The default replay covers **1,118 files / 28,290 events**; enabling
+`fault-injection` covers all **1,157 files / 28,831 events**.
+All non-excluded cases are mapped to a trace. Search cases exercise Rocq
+`Search` patterns, optional explicit PET source contexts (`at`), malformed
+patterns, and output-boundary behavior; they do not search catalog strings.
+`Open` and `Completed` are the only proof lifecycle values: synchronous
+writeback failures remain open attempts, so the matrix does not manufacture
+durable `Pending` or `Rejected` targets.
 
-Some families share trace files: the corpus has **1,957 files**, with **169,255
-events** in the fault-injection build. The manifest marks **146,977 cases
-implemented**, **114 excluded**, and **none unmapped**. The structural tests
-check case-to-command mapping and file/event counts; the process test compares
-complete responses. Forty-two fault and declaration-race traces run only with
-`--all-features`.
+## Authority and exclusions
 
-## Excluded combinations
+- Dune `describe` selects sources and logical libraries; malformed Dune
+  configuration is an invalid-configuration process case.
+- PET owns declaration headers, AST ranges, command acceptance, goals,
+  completion, and every semantic query.
+- Local code is limited to source byte anchors, atomic persistence, and MCP
+  envelope validation.
+- There is no wrapper-owned project lock or exclusive-project failure axis.
+  Concurrent build metadata is Dune's responsibility, and a competing Dune
+  build is covered as a successful `start` case.
+- Three duplicate-theory location combinations are excluded because Dune
+  rejects the workspace before declaration location can be reached; their Dune
+  configuration failures are covered separately.
+- Context-free semantic queries are excluded unless a selected proof or
+  explicit `at` declaration supplies a PET state.
 
-These outputs cannot occur through the current public route. They remain in the
-manifest with an `exclusion.code` and reason; they are not reported as tested.
+Regenerate after matrix changes with:
 
-| Code | Cases | Reason |
-|---|---:|---|
-| `query_without_target` | 24 | `goals`, `search`, `type`, and `notations` have no target to resolve. |
-| `query_without_proof_anchor` | 24 | Only `goals` compares an existing proof anchor. |
-| `query_without_pet` | 12 | Catalog/source-only queries cannot have a PET timeout. |
-| `attached_project_query` | 27 | Query reuses the project attached by `start`. |
-| `attached_project_prove` | 3 | Prove reuses that attachment. |
-| `attached_project_check` | 18 | Check reuses the attachment held since start/declare. |
-| `attached_project_check_multi` | 3 | Candidate checks use the selected proof's attachment. |
-| `open_has_no_axiom_baseline` | 3 | An unsolved proof has no frozen candidate baseline. |
-
-The suite covers `_CoqProject` and Dune layouts, all six tools, connection and
-server restarts, multi-user branches, source and toolchain changes, PET faults,
-trust rejection, publication crash windows, and recovery. It does **not** test a
-network intermediary dropping a response while the server stays alive, or
-arbitrary large-scale schedules beyond the checked-in simultaneous requests.
+```bash
+python3 tools/generate_trace_cases.py
+```

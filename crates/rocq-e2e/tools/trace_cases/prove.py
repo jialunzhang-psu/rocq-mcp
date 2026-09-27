@@ -2,23 +2,33 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 
+from .common import (
+    ATTACHED,
+    DONE_TRUE,
+    OPEN_TRUE,
+    command,
+    declaration,
+    event,
+    invalid_request,
+    prove_args,
+    user_command,
+    write_jsonl,
+    write_materialized_family,
+)
 from .matrix import ROOT
-from .common import BASIC_CATALOG, DONE_TRUE, OPEN_TRUE, command, event, invalid_request, user_command, write_materialized_family
 from .multiuser import close_success
-from .target_query import materialize_prove_status_runtimes, materialize_prove_statuses
 
 
 def prove_selection_setup(selection: str) -> list[dict[str, object]]:
     if selection == "no_project":
         return []
-    setup = [command("start", {"project_path": "prove_project"}, BASIC_CATALOG)]
+    setup = [command("start", {"project_path": "prove_project"}, ATTACHED)]
     if selection == "open":
-        setup.append(command("prove", {"theorem": "open_true"}, OPEN_TRUE))
+        setup.append(command("prove", prove_args("Demo.Main.open_true"), OPEN_TRUE))
     elif selection == "completed":
-        setup.append(command("prove", {"theorem": "done_true"}, DONE_TRUE))
+        setup.append(command("prove", prove_args("Demo.Main.done_true"), DONE_TRUE))
     return setup
 
 def prove_lifecycle_prefix(selection: str, lifecycle: str) -> list[dict[str, object]]:
@@ -38,23 +48,22 @@ def prove_lifecycle_prefix(selection: str, lifecycle: str) -> list[dict[str, obj
 
 def prove_target_args(target: str, extra: str) -> dict[str, object]:
     args: dict[str, object] = {}
-    values: dict[str, object] = {
-        "null": None,
-        "wrong_type": 0,
-        "empty": "",
-        "open_short": "open_true",
-        "nested_suffix": "Nested.duplicate",
-        "library_suffix": "Main.open_true",
-        "full_name": "Demo.Main.open_true",
-        "completed": "done_true",
-        "not_found": "missing",
-        "ambiguous": "duplicate",
-        "invalid_syntax": "bad-name",
-        "at_limit": "a" * (64 * 1024),
-        "over_limit": "a" * (64 * 1024 + 1),
-    }
-    if target != "missing_field":
-        args["theorem"] = values[target]
+    if target == "null":
+        args["declaration"] = None
+    elif target == "wrong_type":
+        args["declaration"] = "Demo.Main.open_true"
+    elif target == "empty":
+        args["declaration"] = {}
+    elif target != "missing_field":
+        qualified = {
+            "full_name": "Demo.Main.open_true",
+            "completed": "Demo.Main.done_true",
+            "not_found": "missing",
+            "invalid_syntax": "bad-name",
+            "at_limit": "a" * (64 * 1024),
+            "over_limit": "a" * (64 * 1024 + 1),
+        }[target]
+        args["declaration"] = declaration(qualified)
     if extra == "present":
         args["extra"] = True
     return args
@@ -64,22 +73,21 @@ def prove_target_expected(target: str, extra: str, selection: str) -> object:
         return invalid_request("unexpected field 'extra'")
     if selection == "no_project":
         return invalid_request("call start first")
-    if target in {"missing_field", "null", "wrong_type", "empty"}:
-        return invalid_request("theorem must be a non-empty string")
-    if target in {"open_short", "library_suffix", "full_name"}:
+    if target == "missing_field":
+        return invalid_request("declaration is required")
+    if target in {"null", "wrong_type"}:
+        return invalid_request("declaration must be an object")
+    if target == "empty":
+        return invalid_request("declaration.file is required")
+    if target == "full_name":
         return OPEN_TRUE
-    if target == "nested_suffix":
-        return {
-            **OPEN_TRUE,
-            "theorem": "Demo.Main.Nested.duplicate",
-            "statement": "Theorem duplicate : True",
-        }
     if target == "completed":
         return DONE_TRUE
-    if target == "ambiguous":
-        return {"kind": "ambiguous", "message": "declaration name is ambiguous"}
     if target in {"invalid_syntax", "over_limit"}:
-        return invalid_request("query name is invalid")
+        return {
+            "kind": "invalid_declaration",
+            "message": "declaration identity is invalid",
+        }
     requested = "missing" if target == "not_found" else "a" * (64 * 1024)
     return {
         "kind": "not_found",
@@ -87,12 +95,7 @@ def prove_target_expected(target: str, extra: str, selection: str) -> object:
     }
 
 def materialize_prove(records: list[dict[str, object]]) -> None:
-    """Write deterministic alive-runtime prove cases.
-
-    Runtime fault cases and Pending/Rejected setup remain unmapped until their
-    per-case isolation fixtures are implemented; this function never labels
-    those cases as covered by an ordinary alive trace.
-    """
+    """Write deterministic and isolated-runtime prove cases."""
     directory = ROOT / "traces/proof/generated/prove"
     if directory.exists():
         shutil.rmtree(directory)
@@ -101,7 +104,6 @@ def materialize_prove(records: list[dict[str, object]]) -> None:
         for record in records
         if isinstance(record["axes"], dict)
         and record["axes"]["runtime"] == "alive"
-        and record["axes"]["target"] not in {"pending", "rejected"}
     ]
     grouped: dict[str, list[dict[str, object]]] = {}
     for record in selected:
@@ -128,28 +130,13 @@ def materialize_prove(records: list[dict[str, object]]) -> None:
         events.extend([event("user_disconnect", user="alice"), event("server_kill")])
         path = ROOT / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "".join(
-                json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-                for item in events
-            )
-        )
-    materialize_prove_statuses(
-        [
-            record
-            for record in records
-            if isinstance(record["axes"], dict)
-            and record["axes"]["runtime"] == "alive"
-            and record["axes"]["target"] in {"pending", "rejected"}
-        ]
-    )
+        write_jsonl(path, events)
     materialize_prove_pet_killed(
         [
             record
             for record in records
             if isinstance(record["axes"], dict)
             and record["axes"]["runtime"] == "pet_killed"
-            and record["axes"]["target"] not in {"pending", "rejected"}
         ]
     )
     materialize_prove_pet_evicted(
@@ -158,7 +145,6 @@ def materialize_prove(records: list[dict[str, object]]) -> None:
             for record in records
             if isinstance(record["axes"], dict)
             and record["axes"]["runtime"] == "pet_evicted"
-            and record["axes"]["target"] not in {"pending", "rejected"}
         ]
     )
     materialize_prove_timeouts(
@@ -167,16 +153,6 @@ def materialize_prove(records: list[dict[str, object]]) -> None:
             for record in records
             if isinstance(record["axes"], dict)
             and record["axes"]["runtime"] == "proof_timeout"
-            and record["axes"]["target"] not in {"pending", "rejected"}
-        ]
-    )
-    materialize_prove_status_runtimes(
-        [
-            record
-            for record in records
-            if isinstance(record["axes"], dict)
-            and record["axes"]["runtime"] != "alive"
-            and record["axes"]["target"] in {"pending", "rejected"}
         ]
     )
 
@@ -187,7 +163,7 @@ def append_pet_detacher(
     events.append(event("user_connect", user="bob"))
     events.append(
         user_command(
-            "bob", "start", {"project_path": "prove_project"}, BASIC_CATALOG
+            "bob", "start", {"project_path": "prove_project"}, ATTACHED
         )
     )
     name = f"detacher_{record['case']}"
@@ -201,14 +177,19 @@ def append_pet_detacher(
         user_command(
             "bob",
             "declare",
-            {"name": name, "statement": "True"},
+            {
+                "name": name,
+                "statement": "True",
+                "library": "Demo.Main",
+                "file": "Main.v",
+            },
             state,
         )
     )
     events.append(close_success("bob", state, "exact I."))
 
 def materialize_prove_pet_killed(records: list[dict[str, object]]) -> None:
-    """Exercise every non-status prove case with a real PET death/retry lane."""
+    """Exercise every prove case with a real PET death/retry lane."""
     directory = ROOT / "traces/pet_fault/generated/prove_pet_killed"
     if directory.exists():
         shutil.rmtree(directory)
@@ -239,21 +220,11 @@ def materialize_prove_pet_killed(records: list[dict[str, object]]) -> None:
         events.extend(
             [event("user_disconnect", user="alice"), event("server_kill")]
         )
-        (ROOT / str(record["trace"])).write_text(
-            "".join(
-                json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-                for item in events
-            )
-        )
+        write_jsonl((ROOT / str(record["trace"])), events)
         record["implementation"] = "implemented"
 
 def prove_timeout_expected(target: str, extra: str, selection: str) -> object:
-    if extra == "present" or selection == "no_project" or target not in {
-        "open_short",
-        "nested_suffix",
-        "library_suffix",
-        "full_name",
-    }:
+    if extra == "present" or selection == "no_project" or target != "full_name":
         return prove_target_expected(target, extra, selection)
     return {"kind": "proof_timeout", "message": "PET operation timed out"}
 
@@ -287,12 +258,7 @@ def materialize_prove_timeouts(records: list[dict[str, object]]) -> None:
         )
         target_path = ROOT / str(record["trace"])
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(
-            "".join(
-                json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-                for item in events
-            )
-        )
+        write_jsonl(target_path, events)
         record["implementation"] = "implemented"
 
 def materialize_prove_pet_evicted(records: list[dict[str, object]]) -> None:
@@ -301,15 +267,6 @@ def materialize_prove_pet_evicted(records: list[dict[str, object]]) -> None:
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
-    b_catalog = {
-        "declarations": [
-            {
-                "name": "EvictB.Main.truth_b",
-                "statement": "Theorem truth_b : True",
-                "status": "Open",
-            }
-        ]
-    }
     b_state = {
         "theorem": "EvictB.Main.truth_b",
         "statement": "Theorem truth_b : True",
@@ -346,11 +303,11 @@ def materialize_prove_pet_evicted(records: list[dict[str, object]]) -> None:
                 owner,
                 "start",
                 {"project_path": "prove_project"},
-                BASIC_CATALOG,
+                ATTACHED,
             )
         )
         events.append(
-            user_command(owner, "prove", {"theorem": "open_true"}, OPEN_TRUE)
+            user_command(owner, "prove", prove_args("Demo.Main.open_true"), OPEN_TRUE)
         )
         if selection == "project":
             events.append(
@@ -358,21 +315,21 @@ def materialize_prove_pet_evicted(records: list[dict[str, object]]) -> None:
                     "alice",
                     "start",
                     {"project_path": "prove_project"},
-                    BASIC_CATALOG,
+                    ATTACHED,
                 )
             )
         elif selection == "completed":
             events.append(
-                user_command("alice", "prove", {"theorem": "done_true"}, DONE_TRUE)
+                user_command("alice", "prove", prove_args("Demo.Main.done_true"), DONE_TRUE)
             )
         events.append(event("user_connect", user="bob"))
         events.append(
             user_command(
-                "bob", "start", {"project_path": "other_project"}, b_catalog
+                "bob", "start", {"project_path": "other_project"}, ATTACHED
             )
         )
         events.append(
-            user_command("bob", "prove", {"theorem": "truth_b"}, b_state)
+            user_command("bob", "prove", prove_args("EvictB.Main.truth_b"), b_state)
         )
         target = str(axes["target"])
         extra = str(axes["extra"])
@@ -389,22 +346,15 @@ def materialize_prove_pet_evicted(records: list[dict[str, object]]) -> None:
         events.extend(
             [event("user_disconnect", user="alice"), event("server_kill")]
         )
-        (ROOT / str(record["trace"])).write_text(
-            "".join(
-                json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-                for item in events
-            )
-        )
+        write_jsonl((ROOT / str(record["trace"])), events)
         record["implementation"] = "implemented"
 
 def prove_failure_is_materialized(axes: dict[str, object]) -> bool:
     return axes["failure"] in {
         "not_found",
-        "ambiguous",
         "proof_timeout",
         "closed_attempt",
         "invalid_configuration",
-        "declaration_changed",
     }
 
 def materialize_prove_failures(records: list[dict[str, object]]) -> None:
@@ -413,7 +363,7 @@ def materialize_prove_failures(records: list[dict[str, object]]) -> None:
     for record in records:
         axes = record["axes"]
         assert isinstance(axes, dict)
-        if axes["failure"] in {"not_found", "ambiguous", "closed_attempt"}:
+        if axes["failure"] in {"not_found", "closed_attempt"}:
             deterministic.append(record)
 
     def append(events: list[dict[str, object]], members: list[dict[str, object]]) -> None:
@@ -426,26 +376,18 @@ def materialize_prove_failures(records: list[dict[str, object]]) -> None:
                     "message": "declaration 'missing' was not found",
                 }
                 target = "missing"
-            elif axes["failure"] == "ambiguous":
-                expected = {
-                    "kind": "ambiguous",
-                    "message": "declaration name is ambiguous",
-                }
-                target = "duplicate"
-                events.append(command("prove", {"theorem": target}, expected))
-                continue
             else:
-                events.append(command("prove", {"theorem": "open_true"}, OPEN_TRUE))
+                events.append(command("prove", prove_args("Demo.Main.open_true"), OPEN_TRUE))
                 events.append(close_success("alice", OPEN_TRUE, "exact I."))
                 events.append(
                     command(
                         "prove",
-                        {"theorem": "open_true"},
+                        prove_args("Demo.Main.open_true"),
                         {**OPEN_TRUE, "status": "Completed", "goals": ""},
                     )
                 )
                 continue
-            events.append(command("prove", {"theorem": target}, expected))
+            events.append(command("prove", prove_args(target), expected))
 
     write_materialized_family("prove_failures", deterministic, append)
     materialize_prove_failure_timeouts(
@@ -461,13 +403,6 @@ def materialize_prove_failures(records: list[dict[str, object]]) -> None:
         if isinstance(record["axes"], dict)
         and record["axes"]["failure"] == "invalid_configuration"
     ])
-    for record in records:
-        axes = record["axes"]
-        assert isinstance(axes, dict)
-        if axes["failure"] == "declaration_changed":
-            # The environment-change trace already has the exact public prove
-            # assertion after a frozen candidate's source header changes.
-            record["implementation"] = "implemented"
 
 def materialize_prove_configuration_failures(records: list[dict[str, object]]) -> None:
     """Prove must reject a selected project whose load path later breaks."""
@@ -475,29 +410,30 @@ def materialize_prove_configuration_failures(records: list[dict[str, object]]) -
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
-    catalog = {"declarations": [
-        {"name": "Demo.Main.truth", "statement": "Theorem truth : True", "status": "Open"}
-    ]}
-    failure = {"kind": "invalid_configuration", "message": "_CoqProject load path is incomplete"}
+    failure = {"kind": "invalid_configuration", "message": "Dune workspace discovery failed"}
     for record in records:
         axes = record["axes"]
         assert isinstance(axes, dict)
         lifecycle = str(axes["lifecycle"])
         events = [event("server_start"), event("user_connect", user="alice")]
         if lifecycle != "connected":
-            events.append(command("start", {"project_path": "project_config"}, catalog))
+            events.append(command("start", {"project_path": "project_config_dune"}, ATTACHED))
             if lifecycle == "reconnect":
                 events.extend([event("user_disconnect", user="alice"), event("user_connect", user="alice")])
             else:
                 events.extend([event("server_kill"), event("server_start"), event("user_connect", user="alice")])
         events.extend([
-            command("start", {"project_path": "project_config"}, catalog),
-            command("prove", {"theorem": "truth"}, failure),
+            command("start", {"project_path": "project_config_dune"}, ATTACHED),
+            command(
+                "prove",
+                prove_args("Demo.Main.truth", "theories/Main.v"),
+                failure,
+            ),
             event("user_disconnect", user="alice"), event("server_kill"),
         ])
         target = ROOT / str(record["trace"])
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n" for item in events))
+        write_jsonl(target, events)
         record["implementation"] = "implemented"
 
 def materialize_prove_failure_timeouts(records: list[dict[str, object]]) -> None:
@@ -513,17 +449,12 @@ def materialize_prove_failure_timeouts(records: list[dict[str, object]]) -> None
         events.append(
             command(
                 "prove",
-                {"theorem": "open_true"},
+                prove_args("Demo.Main.open_true"),
                 {"kind": "proof_timeout", "message": "PET operation timed out"},
             )
         )
         events.extend(
             [event("user_disconnect", user="alice"), event("server_kill")]
         )
-        (ROOT / str(record["trace"])).write_text(
-            "".join(
-                json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-                for item in events
-            )
-        )
+        write_jsonl((ROOT / str(record["trace"])), events)
         record["implementation"] = "implemented"

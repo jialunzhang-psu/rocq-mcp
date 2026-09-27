@@ -3,9 +3,6 @@
 use rocq_e2e::{Event, TraceError, TraceRunner};
 use std::{fs, path::Path};
 
-/// Observe copied source after a lost close response, before recovery starts.
-/// The multi-file checks prove `between_replacements` really left one source
-/// replacement visible while the Dune metadata replacement was absent.
 pub fn attach(runner: TraceRunner, trace: &Path, lab: &Path) -> TraceRunner {
     let stem = trace
         .file_stem()
@@ -29,15 +26,10 @@ pub fn attach(runner: TraceRunner, trace: &Path, lab: &Path) -> TraceRunner {
             "after_promote" | "before_replace" => (false, false),
             "between_replacements" => (true, false),
             "after_replace" | "after_final_build" | "before_ack" => (true, true),
-            _ => return Err(TraceError::InvalidConfiguration {
-                path: dune.clone(), message: format!("unknown publication fault point: {point}"),
-            }),
+            _ => return Err(TraceError::InvalidConfiguration { path: dune.clone(), message: format!("unknown publication fault point: {point}") }),
         };
         if (source_present, metadata_present) != expected {
-            return Err(TraceError::InvalidConfiguration {
-                path: dune,
-                message: format!("fault {point} observed source/metadata presence ({source_present}, {metadata_present}), expected {expected:?}"),
-            });
+            return Err(TraceError::InvalidConfiguration { path: dune, message: format!("fault {point} observed source/metadata presence ({source_present}, {metadata_present}), expected {expected:?}") });
         }
         Ok(())
     })

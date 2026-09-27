@@ -1,1 +1,1 @@
-(rocq.theory (name DeclChangeDune) (modules A B C))
+(rocq.theory (name DeclChange) (modules A B C))

@@ -2,25 +2,12 @@
 
 from __future__ import annotations
 
-import json
+from .common import ATTACHED, prove_args
 import shutil
 
 from .matrix import FIXTURE, ROOT
-from .common import OPEN_TRUE, PROOF_CATALOG, PROOF_OPEN, event, user_command
+from .common import OPEN_TRUE, PROOF_OPEN, event, user_command, write_jsonl
 from .check import PAIR_OPEN
-from .declare import FILES_CATALOG
-
-
-def single_user_catalog(letter: str) -> dict[str, object]:
-    return {
-        "declarations": [
-            {
-                "name": f"Project{letter.upper()}.Main.truth_{letter}",
-                "statement": f"Theorem truth_{letter} : True",
-                "status": "Open",
-            }
-        ]
-    }
 
 def truth_state(theorem: str, statement: str, completed: bool = False) -> dict[str, object]:
     return {
@@ -46,27 +33,54 @@ def user_setup(
     events: list[dict[str, object]],
     user: str,
     project_path: str,
-    catalog: object,
     target: str,
+    file: str,
     state: object,
 ) -> None:
-    events.append(user_command(user, "start", {"project_path": project_path}, catalog))
-    events.append(user_command(user, "prove", {"theorem": target}, state))
+    events.append(user_command(user, "start", {"project_path": project_path}, ATTACHED))
+    events.append(user_command(user, "prove", prove_args(target, file), state))
+
+def reopen(
+    events: list[dict[str, object]],
+    user: str,
+    target: str,
+    file: str,
+    state: object,
+) -> None:
+    """Replace one stale selected attempt without redundantly reattaching its project."""
+    events.append(user_command(user, "prove", prove_args(target, file), state))
 
 def close_success(user: str, state: dict[str, object], tactic: str) -> dict[str, object]:
     return user_command(
         user,
         "check",
-        {"commands": tactic},
-        {"state": {**state, "status": "Completed", "goals": ""}, "error": None},
+        {"attempts": [tactic]},
+        {
+            "selected": 0,
+            "state": {**state, "status": "Completed", "goals": ""},
+            "rejected": [],
+            "error": None,
+        },
     )
 
 def close_lost(user: str, tactic: str) -> dict[str, object]:
     return user_command(
         user,
         "check",
-        {"commands": tactic},
+        {"attempts": [tactic]},
         {"kind": "not_found", "message": "proof attempt is no longer open"},
+    )
+
+def source_changed(user: str, tactic: str) -> dict[str, object]:
+    """Reject a check whose same-file sibling publication invalidated its CAS snapshot."""
+    return user_command(
+        user,
+        "check",
+        {"attempts": [tactic]},
+        {
+            "kind": "declaration_changed",
+            "message": "declaration source changed while proof was open",
+        },
     )
 
 def finish_users(events: list[dict[str, object]], users: list[str]) -> None:
@@ -85,12 +99,7 @@ def write_dedicated_family(
         target = ROOT / str(record["trace"])
         target.parent.mkdir(parents=True, exist_ok=True)
         events = build(record)
-        target.write_text(
-            "".join(
-                json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-                for item in events
-            )
-        )
+        write_jsonl(target, events)
         record["implementation"] = "implemented"
 
 def materialize_two_users(records: list[dict[str, object]]) -> None:
@@ -103,28 +112,32 @@ def materialize_two_users(records: list[dict[str, object]]) -> None:
         events = multi_user_prefix(["alice", "bob"], str(axes["lifecycle"]))
         if variant.startswith("same_theorem"):
             for user in ("alice", "bob"):
-                user_setup(events, user, "matrix_project", PROOF_CATALOG, "truth", PROOF_OPEN)
+                user_setup(events, user, "matrix_project", "Matrix.Main.truth", "Main.v", PROOF_OPEN)
             winner = "alice" if variant.endswith("alice_wins") else "bob"
             loser = "bob" if winner == "alice" else "alice"
             events.append(close_success(winner, PROOF_OPEN, "exact I."))
             events.append(close_lost(loser, "exact I."))
-        elif variant == "different_theorem_same_project":
-            user_setup(events, "alice", "matrix_project", PROOF_CATALOG, "truth", PROOF_OPEN)
-            user_setup(events, "bob", "matrix_project", PROOF_CATALOG, "pair", PAIR_OPEN)
+        elif variant == "different_theorem_same_file":
+            user_setup(events, "alice", "matrix_project", "Matrix.Main.truth", "Main.v", PROOF_OPEN)
+            user_setup(events, "bob", "matrix_project", "Matrix.Main.pair", "Main.v", PAIR_OPEN)
             events.append(close_success("alice", PROOF_OPEN, "exact I."))
+            # Design note: the immutable whole-file CAS intentionally rejects
+            # Bob's old snapshot even though Alice changed a sibling theorem.
+            events.append(source_changed("bob", "exact (conj I I)."))
+            reopen(events, "bob", "Matrix.Main.pair", "Main.v", PAIR_OPEN)
             events.append(close_success("bob", PAIR_OPEN, "exact (conj I I)."))
         elif variant == "different_file_same_project":
             a = truth_state("Files.A.a", "Theorem a : True")
             b = truth_state("Files.B.b", "Theorem b : True")
-            user_setup(events, "alice", "user_files_project", FILES_CATALOG, "a", a)
-            user_setup(events, "bob", "user_files_project", FILES_CATALOG, "b", b)
+            user_setup(events, "alice", "user_files_project", "Files.A.a", "A.v", a)
+            user_setup(events, "bob", "user_files_project", "Files.B.b", "B.v", b)
             events.append(close_success("alice", a, "exact I."))
             events.append(close_success("bob", b, "exact I."))
         else:
             a = truth_state("ProjectA.Main.truth_a", "Theorem truth_a : True")
             b = truth_state("ProjectB.Main.truth_b", "Theorem truth_b : True")
-            user_setup(events, "alice", "user_project_a", single_user_catalog("a"), "truth_a", a)
-            user_setup(events, "bob", "user_project_b", single_user_catalog("b"), "truth_b", b)
+            user_setup(events, "alice", "user_project_a", "ProjectA.Main.truth_a", "Main.v", a)
+            user_setup(events, "bob", "user_project_b", "ProjectB.Main.truth_b", "Main.v", b)
             events.append(close_success("alice", a, "exact I."))
             events.append(close_success("bob", b, "exact I."))
         finish_users(events, ["alice", "bob"])
@@ -149,8 +162,8 @@ def materialize_three_users(records: list[dict[str, object]]) -> None:
             for user in users:
                 states[user] = PROOF_OPEN
                 tactics[user] = "exact I."
-                targets[user] = "truth"
-                user_setup(events, user, "matrix_project", PROOF_CATALOG, "truth", PROOF_OPEN)
+                targets[user] = "Matrix.Main.truth"
+                user_setup(events, user, "matrix_project", "Matrix.Main.truth", "Main.v", PROOF_OPEN)
             winner = variant.removeprefix("all_same_").removesuffix("_wins")
             events.append(close_success(winner, states[winner], tactics[winner]))
             for user in users:
@@ -176,13 +189,31 @@ def materialize_three_users(records: list[dict[str, object]]) -> None:
                 ),
             }
             for user, (target, state, tactic) in entries.items():
-                user_setup(events, user, "matrix_project", PROOF_CATALOG, target, state)
+                user_setup(events, user, "matrix_project", f"Matrix.Main.{target}", "Main.v", state)
                 states[user], tactics[user] = state, tactic
-            events.extend(close_success(user, states[user], tactics[user]) for user in users)
+            events.append(close_success("alice", states["alice"], tactics["alice"]))
+            for user in ("bob", "carol"):
+                events.append(source_changed(user, tactics[user]))
+                target = entries[user][0]
+                reopen(
+                    events,
+                    user,
+                    f"Matrix.Main.{target}",
+                    "Main.v",
+                    states[user],
+                )
+                events.append(close_success(user, states[user], tactics[user]))
         elif variant == "different_files_same_project":
             for user, letter in zip(users, ("a", "b", "c"), strict=True):
                 state = truth_state(f"Files.{letter.upper()}.{letter}", f"Theorem {letter} : True")
-                user_setup(events, user, "user_files_project", FILES_CATALOG, letter, state)
+                user_setup(
+                    events,
+                    user,
+                    "user_files_project",
+                    f"Files.{letter.upper()}.{letter}",
+                    f"{letter.upper()}.v",
+                    state,
+                )
                 states[user], tactics[user] = state, "exact I."
             events.extend(close_success(user, states[user], tactics[user]) for user in users)
         elif variant == "different_projects":
@@ -195,8 +226,8 @@ def materialize_three_users(records: list[dict[str, object]]) -> None:
                     events,
                     user,
                     f"user_project_{letter}",
-                    single_user_catalog(letter),
-                    f"truth_{letter}",
+                    f"Project{letter.upper()}.Main.truth_{letter}",
+                    "Main.v",
                     state,
                 )
                 states[user], tactics[user] = state, "exact I."
@@ -206,9 +237,17 @@ def materialize_three_users(records: list[dict[str, object]]) -> None:
             winner = variant.split("_same_")[1].removesuffix("_wins")
             different = next(user for user in users if user not in pair)
             for user in pair:
-                user_setup(events, user, "matrix_project", PROOF_CATALOG, "truth", PROOF_OPEN)
-            user_setup(events, different, "matrix_project", PROOF_CATALOG, "pair", PAIR_OPEN)
+                user_setup(events, user, "matrix_project", "Matrix.Main.truth", "Main.v", PROOF_OPEN)
+            user_setup(events, different, "matrix_project", "Matrix.Main.pair", "Main.v", PAIR_OPEN)
             events.append(close_success(winner, PROOF_OPEN, "exact I."))
+            events.append(source_changed(different, "exact (conj I I)."))
+            reopen(
+                events,
+                different,
+                "Matrix.Main.pair",
+                "Main.v",
+                PAIR_OPEN,
+            )
             events.append(close_success(different, PAIR_OPEN, "exact (conj I I)."))
             loser = next(user for user in pair if user != winner)
             events.append(close_lost(loser, "exact I."))

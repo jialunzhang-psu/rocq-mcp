@@ -1,10 +1,10 @@
 {"event":"server_start"}
 {"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config_dune"}},"expected":{"attached":true}}
 {"event":"user_disconnect","user":"alice"}
 {"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config"}},"expected":{"declarations":[{"name":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open"}]}}
-{"event":"command","user":"alice","command":{"tool":"prove","args":{"theorem":"truth"}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n"}}
-{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals"}},"expected":{"kind":"invalid_configuration","message":"invalid PET request: _CoqProject load path is incomplete"}}
+{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"project_config_dune"}},"expected":{"attached":true}}
+{"event":"command","user":"alice","command":{"tool":"prove","args":{"declaration":{"file":"theories/Main.v","qualified_path":["Demo","Main","truth"]}}},"expected":{"theorem":"Demo.Main.truth","statement":"Theorem truth : True","status":"Open","goals":"focused:\n  ============================\n  True\nunfocused:\nshelved:\ngiven_up:\n","checkpoint":{"$checkpoint":true}}}
+{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals"}},"expected":{"kind":"invalid_configuration","message":"Dune workspace discovery failed"}}
 {"event":"user_disconnect","user":"alice"}
 {"event":"server_kill"}

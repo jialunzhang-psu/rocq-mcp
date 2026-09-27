@@ -2,15 +2,45 @@
 
 from __future__ import annotations
 
-from .common import PROOF_CATALOG, PROOF_OPEN, event, user_command
+from .common import ATTACHED, PROOF_OPEN, event, user_command
 from .check import PAIR_OPEN
-from .multiuser import close_lost, close_success, finish_users, single_user_catalog, truth_state, user_setup, write_dedicated_family
+from .multiuser import close_lost, close_success, finish_users, truth_state, user_setup, write_dedicated_family
 
 
 def _parallel(item: dict[str, object]) -> dict[str, object]:
     """Mark one command as a member of the adjacent two-request barrier."""
     item["parallel_group"] = "race"
     return item
+
+
+def _same_file_close(
+    user: str, state: dict[str, object], tactic: str
+) -> dict[str, object]:
+    """Allow either winner or stale-CAS result without accepting a stale checkpoint."""
+    item = close_success(user, state, tactic)
+    success = item["expected"]
+    item["expected"] = {
+        "$one_of": [
+            success,
+            {
+                "kind": "declaration_changed",
+                "message": "declaration source changed while proof was open",
+            },
+            {
+                "selected": 0,
+                "state": {
+                    **state,
+                    "goals": "focused:\nunfocused:\nshelved:\ngiven_up:\n",
+                },
+                "rejected": [],
+                "error": {
+                    "kind": "declaration_changed",
+                    "message": "invalid PET request: declaration interface changed",
+                },
+            },
+        ]
+    }
+    return _parallel(item)
 
 
 def materialize_simultaneous_requests(records: list[dict[str, object]]) -> None:
@@ -22,44 +52,58 @@ def materialize_simultaneous_requests(records: list[dict[str, object]]) -> None:
         events = [event("server_start"), event("user_connect", user="alice"), event("user_connect", user="bob")]
         if boundary == "same_theorem_double_close":
             for user in ("alice", "bob"):
-                user_setup(events, user, "matrix_project", PROOF_CATALOG, "truth", PROOF_OPEN)
+                user_setup(events, user, "matrix_project", "Matrix.Main.truth", "Main.v", PROOF_OPEN)
             loser = close_lost("bob", "exact I.")
             loser["expected"] = {"$one_of": [
                 loser["expected"],
-                {"state": {**PROOF_OPEN, "goals": "focused:\nunfocused:\nshelved:\ngiven_up:\n"},
-                 "error": {"kind": "not_found", "message": "proof attempt is no longer open"}},
+                {
+                    "selected": 0,
+                    "state": {
+                        **PROOF_OPEN,
+                        "goals": "focused:\nunfocused:\nshelved:\ngiven_up:\n",
+                    },
+                    "rejected": [],
+                    "error": {
+                        "kind": "not_found",
+                        "message": "proof attempt is no longer open",
+                    },
+                },
             ]}
             events.extend([
                 _parallel(close_success("alice", PROOF_OPEN, "exact I.")),
                 _parallel(loser),
             ])
-        elif boundary == "different_theorem_same_project_close":
-            user_setup(events, "alice", "matrix_project", PROOF_CATALOG, "truth", PROOF_OPEN)
-            user_setup(events, "bob", "matrix_project", PROOF_CATALOG, "pair", PAIR_OPEN)
+        elif boundary == "different_theorem_same_file_close":
+            user_setup(events, "alice", "matrix_project", "Matrix.Main.truth", "Main.v", PROOF_OPEN)
+            user_setup(events, "bob", "matrix_project", "Matrix.Main.pair", "Main.v", PAIR_OPEN)
             events.extend([
-                _parallel(close_success("alice", PROOF_OPEN, "exact I.")),
-                _parallel(close_success("bob", PAIR_OPEN, "exact (conj I I).")),
+                _same_file_close("alice", PROOF_OPEN, "exact I."),
+                _same_file_close("bob", PAIR_OPEN, "exact (conj I I)."),
+            ])
+        elif boundary == "different_file_same_project_close":
+            a = truth_state("Files.A.a", "Theorem a : True")
+            b = truth_state("Files.B.b", "Theorem b : True")
+            user_setup(events, "alice", "user_files_project", "Files.A.a", "A.v", a)
+            user_setup(events, "bob", "user_files_project", "Files.B.b", "B.v", b)
+            events.extend([
+                _parallel(close_success("alice", a, "exact I.")),
+                _parallel(close_success("bob", b, "exact I.")),
             ])
         elif boundary == "different_project_close":
             a = truth_state("ProjectA.Main.truth_a", "Theorem truth_a : True")
             b = truth_state("ProjectB.Main.truth_b", "Theorem truth_b : True")
-            user_setup(events, "alice", "user_project_a", single_user_catalog("a"), "truth_a", a)
-            user_setup(events, "bob", "user_project_b", single_user_catalog("b"), "truth_b", b)
+            user_setup(events, "alice", "user_project_a", "ProjectA.Main.truth_a", "Main.v", a)
+            user_setup(events, "bob", "user_project_b", "ProjectB.Main.truth_b", "Main.v", b)
             events.extend([
                 _parallel(close_success("alice", a, "exact I.")),
                 _parallel(close_success("bob", b, "exact I.")),
             ])
         elif boundary == "read_during_close":
-            user_setup(events, "alice", "matrix_project", PROOF_CATALOG, "truth", PROOF_OPEN)
-            catalog_completed = {"declarations": [
-                {**entry, "status": "Completed"} if entry["name"] == "Matrix.Main.truth" else entry
-                for entry in PROOF_CATALOG["declarations"]
-            ]}
+            user_setup(events, "alice", "matrix_project", "Matrix.Main.truth", "Main.v", PROOF_OPEN)
             events.extend([
                 _parallel(close_success("alice", PROOF_OPEN, "exact I.")),
-                _parallel(user_command("bob", "start", {"project_path": "matrix_project"},
-                                       {"$one_of": [PROOF_CATALOG, catalog_completed]})),
-                user_command("bob", "start", {"project_path": "matrix_project"}, catalog_completed),
+                _parallel(user_command("bob", "start", {"project_path": "matrix_project"}, ATTACHED)),
+                user_command("bob", "start", {"project_path": "matrix_project"}, ATTACHED),
             ])
         else:
             raise AssertionError(boundary)

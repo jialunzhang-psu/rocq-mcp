@@ -39,7 +39,7 @@ fn command_is_exactly_the_user_command_expected_triple() {
 
 #[test]
 fn fault_and_parallel_expectations_are_strict_trace_metadata() {
-    let valid = r#"{"event":"command","user":"alice","command":{"tool":"check","args":{"commands":"exact I."}},"expected":{"$transport":"lost"}}
+    let valid = r#"{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["exact I."]}},"expected":{"$transport":"lost"}}
 {"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals"}},"expected":{"$one_of":[{"text":"a"},{"text":"b"}]},"parallel_group":"race"}
 "#;
     assert_eq!(parse_trace(Cursor::new(valid)).unwrap().events.len(), 2);
