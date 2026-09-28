@@ -66,3 +66,17 @@ fn file_ids_are_exposed_only_where_the_lazy_protocol_needs_them() {
         );
     }
 }
+
+#[test]
+fn prove_and_abandon_use_the_same_target_field() {
+    for name in ["prove", "abandon"] {
+        let tool = tool_definitions()
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap();
+        let schema = serde_json::to_value(tool).unwrap()["inputSchema"].clone();
+        assert_eq!(schema["required"], serde_json::json!(["target"]));
+        assert!(schema["properties"].get("target").is_some());
+        assert!(schema["properties"].get("declaration").is_none());
+    }
+}

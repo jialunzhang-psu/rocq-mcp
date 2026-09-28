@@ -26,7 +26,9 @@ pub enum ErrorKind {
     Ambiguous,
     DeclarationChanged,
     ProofStepFailed,
-    ProofTimeout,
+    /// The PET child or its protocol transport was lost; this is not a
+    /// correctness or execution deadline.
+    PetLost,
     ProjectTimeout,
     BuildTimeout,
     AxiomDependencyOutOfScope,

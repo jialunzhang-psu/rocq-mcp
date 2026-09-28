@@ -296,9 +296,10 @@ checks the same invariant again before touching source.
 
 ## 7. Minimal MCP session state
 
-Each connection has at most one selected unpublished proof. Starting or
-selecting another proof retires the previous active proof according to the
-public command contract.
+Each connection has at most one selected unpublished proof. `prove` and
+`declare` reject while one is active and leave it unchanged; replacement
+requires an explicit `abandon`. Reattaching or switching the connection's
+project may retire the proof as part of `start`.
 
 ```rust
 struct ConnectionSession {
@@ -351,7 +352,10 @@ owned by that connection.
 Public status remains only `Open` or `Completed`. There is no `SourceClosed`,
 `Pending`, or wrapper-guessed completion state. `pet_finished` means that PET
 accepted a terminal proof state; `Completed` additionally requires successful
-publication, Dune validation, and the configured PET trust audit.
+publication, Dune validation, and the configured PET trust audit. Every public
+proof-state view carries the exact reusable `DeclarationId` as `target`, plus
+`status`, `goals`, and an optional selected `checkpoint`; it has no parallel
+string theorem name or repeated statement.
 
 ## 8. PET state ID lifecycle
 
@@ -418,7 +422,7 @@ The MCP proof-session owner decides reachability and calls
 | Rejected `check` candidate | Every exported temporary state, normally none when PET rejects atomically |
 | Successful open `check` | Winning state is transferred to the new checkpoint; temporaries are released |
 | `rewind` | None, because old branches remain selectable |
-| `abandon`, proof replacement, disconnect | Every checkpoint state in that proof |
+| `abandon`, reattachment/project switch, disconnect | Every checkpoint state in that proof |
 | Named query using a temporary context state | That temporary state after the query result is materialized |
 | Successful writeback | No per-ID release; `refresh_workspace` clears the complete exported-state table |
 | Project shutdown or PET crash | No release RPC; terminating the process releases the complete table |
@@ -509,8 +513,8 @@ It owns no proof topology. Its responsibilities include:
 - returning all declarations in that document in one request;
 - opening an exact declaration and returning its state/source metadata;
 - executing a complete fragment atomically from a supplied state;
-- goals, search, type, notation, statement, proof, definition, dependency, and
-  assumption queries;
+- goals plus direct Rocq `Search`, `About`, `Print`, type, notation,
+  dependency, and assumption queries;
 - exact state release;
 - transport failure detection and process restart coordination.
 
@@ -603,20 +607,24 @@ Validate `file` against Dune and make exactly one PET document-declaration
 request. Return PET's canonical identities, kinds, statements, and ranges. Do
 not inspect unrelated files.
 
-### `prove(declaration)`
+### `prove(target)`
 
 Ask PET to resolve the exact `DeclarationId`. If the source declaration is
 unfinished, create a root checkpoint holding PET's root state. If PET reports
 it finished, validate the exact Dune target and trust result before returning
 `Completed`. A required native build uses the project epoch boundary from
 section 5.4, so its post-build audit cannot reuse the pre-build PET state. Do
-not create an engine attempt or trace cursor.
+not create an engine attempt or trace cursor. Reject before PET use when a
+proof is already active; never retire it implicitly.
 
 ### `declare`
 
 Ask PET to validate the new declaration header and produce its root proof
 state and insertion anchor. Derive the compilation-unit prefix from the
 Dune-selected `file`; never ask the caller to repeat Dune's logical library.
+Accept only a compilation-unit-relative `name`, and reject a name that starts
+with the derived prefix rather than normalizing it. Reject while a proof is
+active without changing that proof.
 Retain the exact header in the active `ProofSession`; do not touch the source
 until publication succeeds.
 
@@ -652,10 +660,13 @@ old branch, build, or write source.
 
 ### `query`
 
-Run all semantic variants through PET. With an active proof, use the current
-PET state. Named queries without an active proof obtain a temporary state in
-the target document and release it after returning the materialized result.
-`search` is Rocq `Search`, not a wrapper metadata search.
+Run all semantic variants through PET. Named `about`, `print`, `assumptions`,
+and `dependencies` queries use the current PET state with an active proof;
+without one they obtain a temporary state in the target document and release
+it after returning the materialized result. For `search`, `type`, and
+`notations`, an explicit `at` always selects its source context even while a
+proof is active; otherwise use the active proof and reject if neither context
+exists. `search` is Rocq `Search`, not a wrapper metadata search.
 
 The MCP boundary, not the engine, bounds materialized text to 32 KiB UTF-8
 pages. Continuation is one integer byte offset returned by the preceding page;
@@ -763,7 +774,7 @@ Migration follows this dependency order:
    branch retention and exact temporary-state release.
 7. Migrate writeback to consume the selected checkpoint path directly.
 8. Add PET-crash invalidation and lazy replay from accepted fragments.
-9. Migrate close, abandon, replacement, disconnect, and project shutdown to
+9. Migrate close, abandon, reattachment, disconnect, and project shutdown to
    the single batch-release path.
 10. Delete the superseded engine attempt/trace/pool/catalog/scanner code and
     remove the `trace-forest` crate.
@@ -827,7 +838,7 @@ The redesign is complete only when all of the following hold.
   fragments after PET restart;
 - source or Dune-context changes prevent replay instead of changing theorem
   identity silently;
-- `close`, `abandon`, proof replacement, and disconnect release every retained
+- `close`, `abandon`, reattachment, and disconnect release every retained
   checkpoint state;
 - repeated proof lifecycles do not grow PET's exported-state table.
 

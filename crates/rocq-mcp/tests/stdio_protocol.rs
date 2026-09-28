@@ -119,9 +119,15 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
         &mut output,
         3,
         "prove",
-        serde_json::json!({"declaration":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
+        serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
     );
     assert_eq!(prove["isError"], false, "{prove}");
+    assert_eq!(
+        prove["structuredContent"]["target"],
+        serde_json::json!({"file":"A.v","qualified_path":["Demo","A","t"]})
+    );
+    assert!(prove["structuredContent"].get("theorem").is_none());
+    assert!(prove["structuredContent"].get("statement").is_none());
     let root = prove["structuredContent"]["checkpoint"].as_u64().unwrap();
 
     // A rejected multi-sentence fragment commits none of its accepted prefix.
@@ -134,8 +140,8 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     );
     let rejected_content = &rejected["structuredContent"];
     assert_eq!(rejected["isError"], false, "{rejected}");
-    assert_eq!(rejected_content["selected"], serde_json::Value::Null);
-    assert_eq!(rejected_content["error"], serde_json::Value::Null);
+    assert!(rejected_content.get("selected").is_none());
+    assert!(rejected_content.get("error").is_none());
     assert_eq!(rejected_content["rejected"][0]["kind"], "proof_step_failed");
     assert_eq!(rejected_content["state"]["checkpoint"], root);
 
@@ -154,6 +160,7 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     let accepted_content = &accepted["structuredContent"];
     assert_eq!(accepted_content["selected"], 1);
     assert_eq!(accepted_content["rejected"][0]["kind"], "proof_step_failed");
+    assert!(accepted_content.get("error").is_none());
     let partial_checkpoint = accepted_content["state"]["checkpoint"].as_u64().unwrap();
     assert!(partial_checkpoint > root);
 
@@ -168,6 +175,16 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     assert!(
         tried["structuredContent"]["attempts"][0]["state"]
             .get("checkpoint")
+            .is_none()
+    );
+    assert!(
+        tried["structuredContent"]["attempts"][0]
+            .get("error")
+            .is_none()
+    );
+    assert!(
+        tried["structuredContent"]["attempts"][1]
+            .get("state")
             .is_none()
     );
     assert_eq!(
@@ -270,29 +287,59 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
         "rewinding must preserve the old branch"
     );
 
-    // Selecting another proof invalidates old IDs without resetting the allocator.
-    let prove_u = call_tool(
+    // A replacement request is rejected without changing the selected proof.
+    let rejected_replacement = call_tool(
         &mut input,
         &mut output,
         16,
         "prove",
-        serde_json::json!({"declaration":{"file":"A.v","qualified_path":["Demo","A","u"]}}),
+        serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","u"]}}),
+    );
+    assert_eq!(rejected_replacement["isError"], true);
+    assert_eq!(
+        rejected_replacement["structuredContent"]["kind"],
+        "invalid_request"
+    );
+    let still_selected = call_tool(
+        &mut input,
+        &mut output,
+        17,
+        "query",
+        serde_json::json!({"kind":"goals"}),
+    );
+    assert_eq!(still_selected["structuredContent"]["checkpoint"], third);
+    let abandoned = call_tool(
+        &mut input,
+        &mut output,
+        18,
+        "abandon",
+        serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
+    );
+    assert_eq!(abandoned["isError"], false, "{abandoned}");
+
+    // Explicit abandonment invalidates old IDs without resetting the allocator.
+    let prove_u = call_tool(
+        &mut input,
+        &mut output,
+        19,
+        "prove",
+        serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","u"]}}),
     );
     let u_root = prove_u["structuredContent"]["checkpoint"].as_u64().unwrap();
     assert!(u_root > branch);
     let stale = call_tool(
         &mut input,
         &mut output,
-        17,
+        20,
         "rewind",
         serde_json::json!({"checkpoint":root}),
     );
     assert_eq!(stale["isError"], true);
     assert_eq!(stale["structuredContent"]["kind"], "invalid_request");
     for (id, args) in [
-        (18, serde_json::json!({"steps":0})),
-        (19, serde_json::json!({"steps":1,"checkpoint":u_root})),
-        (20, serde_json::json!({})),
+        (21, serde_json::json!({"steps":0})),
+        (22, serde_json::json!({"steps":1,"checkpoint":u_root})),
+        (23, serde_json::json!({})),
     ] {
         let invalid = call_tool(&mut input, &mut output, id, "rewind", args);
         assert_eq!(invalid["isError"], true, "{invalid}");
@@ -302,7 +349,7 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     let completed = call_tool(
         &mut input,
         &mut output,
-        21,
+        24,
         "check",
         serde_json::json!({"attempts":["exact I."]}),
     );
@@ -315,7 +362,7 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
             .get("checkpoint")
             .is_none()
     );
-    let after_complete = call_tool(&mut input, &mut output, 22, "rewind", serde_json::json!({}));
+    let after_complete = call_tool(&mut input, &mut output, 25, "rewind", serde_json::json!({}));
     assert_eq!(after_complete["isError"], true);
     assert_eq!(
         after_complete["structuredContent"]["message"],
@@ -449,7 +496,7 @@ fn absolute_custom_dune_build_dir_survives_start_and_proof_publication() {
         (
             4,
             "prove",
-            serde_json::json!({"declaration":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
+            serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
         ),
         (5, "check", serde_json::json!({"attempts":["exact I."]})),
     ] {
@@ -472,9 +519,10 @@ fn absolute_custom_dune_build_dir_survives_start_and_proof_publication() {
             );
         }
         if name == "check" {
-            assert_eq!(
-                response["result"]["structuredContent"]["error"],
-                serde_json::Value::Null
+            assert!(
+                response["result"]["structuredContent"]
+                    .get("error")
+                    .is_none()
             );
             assert_eq!(
                 response["result"]["structuredContent"]["state"]["status"],
@@ -492,7 +540,7 @@ fn absolute_custom_dune_build_dir_survives_start_and_proof_publication() {
 }
 
 #[test]
-fn type_query_uses_selected_proof_library_instead_of_first_discovered_file() {
+fn type_query_uses_selected_proof_unless_explicit_at_overrides_it() {
     let project = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("dune-project"),
@@ -540,12 +588,21 @@ fn type_query_uses_selected_proof_library_instead_of_first_discovered_file() {
         (
             3,
             "prove",
-            serde_json::json!({"declaration":{"file":"B.v","qualified_path":["Demo","B","t"]}}),
+            serde_json::json!({"target":{"file":"B.v","qualified_path":["Demo","B","t"]}}),
         ),
         (
             4,
             "query",
             serde_json::json!({"kind":"type","expression":"local_def"}),
+        ),
+        (
+            5,
+            "query",
+            serde_json::json!({
+                "kind":"type",
+                "expression":"first",
+                "at":{"file":"A.v","qualified_path":["Demo","A","first"]}
+            }),
         ),
     ] {
         writeln!(input, "{}", serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).unwrap();
@@ -562,6 +619,34 @@ fn type_query_uses_selected_proof_library_instead_of_first_discovered_file() {
                     .contains("nat")
             );
         }
+    }
+    let local_target = serde_json::json!({"file":"B.v","qualified_path":["Demo","B","local_def"]});
+    for (id, kind) in [(6, "about"), (7, "print")] {
+        let response = call_tool(
+            &mut input,
+            &mut output,
+            id,
+            "query",
+            serde_json::json!({"kind":kind,"target":local_target.clone()}),
+        );
+        assert_eq!(response["isError"], false, "{kind}: {response}");
+        assert!(
+            !response["structuredContent"]["text"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    for (id, kind) in [(8, "statement"), (9, "proof"), (10, "definition")] {
+        let response = call_tool(
+            &mut input,
+            &mut output,
+            id,
+            "query",
+            serde_json::json!({"kind":kind,"target":local_target.clone()}),
+        );
+        assert_eq!(response["isError"], true, "{kind}: {response}");
+        assert_eq!(response["structuredContent"]["kind"], "invalid_request");
     }
     drop(input);
     assert!(child.wait().unwrap().success());
@@ -598,41 +683,90 @@ fn abandon_discards_an_open_declaration_and_allows_redeclaration() {
         serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
     )
     .unwrap();
-    for (id, name, arguments) in [
-        (
-            2,
-            "start",
-            serde_json::json!({"project_path":project.path()}),
-        ),
-        (
-            3,
-            "declare",
-            serde_json::json!({"name":"Demo.Main.fresh","statement":"True","file":"Main.v"}),
-        ),
-        (
-            4,
-            "abandon",
-            serde_json::json!({"declaration":{"file":"Main.v","qualified_path":["Demo","Main","fresh"]}}),
-        ),
-        (
-            5,
-            "declare",
-            serde_json::json!({"name":"Demo.Main.fresh","statement":"True","file":"Main.v"}),
-        ),
-    ] {
-        writeln!(input, "{}", serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).unwrap();
-        input.flush().unwrap();
-        line.clear();
-        output.read_line(&mut line).unwrap();
-        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["result"]["isError"], false, "{name}: {response}");
-        if name == "abandon" {
-            assert_eq!(
-                response["result"]["structuredContent"]["abandoned"],
-                "Demo.Main.fresh"
-            );
-        }
-    }
+    let started = call_tool(
+        &mut input,
+        &mut output,
+        2,
+        "start",
+        serde_json::json!({"project_path":project.path()}),
+    );
+    assert_eq!(started["isError"], false, "{started}");
+
+    let redundant_prefix = call_tool(
+        &mut input,
+        &mut output,
+        3,
+        "declare",
+        serde_json::json!({"name":"Demo.Main.fresh","statement":"True","file":"Main.v"}),
+    );
+    assert_eq!(redundant_prefix["isError"], true, "{redundant_prefix}");
+    assert_eq!(
+        redundant_prefix["structuredContent"]["kind"],
+        "invalid_declaration"
+    );
+
+    let declared = call_tool(
+        &mut input,
+        &mut output,
+        4,
+        "declare",
+        serde_json::json!({"name":"fresh","statement":"True","file":"Main.v"}),
+    );
+    assert_eq!(declared["isError"], false, "{declared}");
+    assert_eq!(
+        declared["structuredContent"]["target"],
+        serde_json::json!({"file":"Main.v","qualified_path":["Demo","Main","fresh"]})
+    );
+    let checkpoint = declared["structuredContent"]["checkpoint"].clone();
+
+    let blocked_declare = call_tool(
+        &mut input,
+        &mut output,
+        5,
+        "declare",
+        serde_json::json!({"name":"other","statement":"True","file":"Main.v"}),
+    );
+    assert_eq!(blocked_declare["isError"], true, "{blocked_declare}");
+    assert_eq!(
+        blocked_declare["structuredContent"]["kind"],
+        "invalid_request"
+    );
+    let still_selected = call_tool(
+        &mut input,
+        &mut output,
+        6,
+        "query",
+        serde_json::json!({"kind":"goals"}),
+    );
+    assert_eq!(
+        still_selected["structuredContent"]["checkpoint"],
+        checkpoint
+    );
+    assert_eq!(
+        still_selected["structuredContent"]["target"],
+        declared["structuredContent"]["target"]
+    );
+
+    let abandoned = call_tool(
+        &mut input,
+        &mut output,
+        7,
+        "abandon",
+        serde_json::json!({"target":{"file":"Main.v","qualified_path":["Demo","Main","fresh"]}}),
+    );
+    assert_eq!(abandoned["isError"], false, "{abandoned}");
+    assert_eq!(
+        abandoned["structuredContent"]["abandoned"],
+        "Demo.Main.fresh"
+    );
+    let redeclared = call_tool(
+        &mut input,
+        &mut output,
+        8,
+        "declare",
+        serde_json::json!({"name":"fresh","statement":"True","file":"Main.v"}),
+    );
+    assert_eq!(redeclared["isError"], false, "{redeclared}");
     drop(input);
     assert!(child.wait().unwrap().success());
     assert_eq!(

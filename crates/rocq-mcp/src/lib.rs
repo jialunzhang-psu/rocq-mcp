@@ -85,16 +85,15 @@ mod tests {
             json!([
                 "goals",
                 "search",
-                "statement",
-                "proof",
-                "definition",
+                "about",
+                "print",
                 "assumptions",
                 "dependencies",
                 "type",
                 "notations"
             ])
         );
-        for field in ["target", "expression", "pattern", "offset"] {
+        for field in ["target", "at", "expression", "pattern", "offset"] {
             assert!(value["inputSchema"]["properties"].get(field).is_some());
         }
         assert_eq!(value["inputSchema"]["properties"]["offset"]["minimum"], 0);
@@ -161,7 +160,7 @@ mod tests {
             (ErrorKind::Ambiguous, "ambiguous"),
             (ErrorKind::DeclarationChanged, "declaration_changed"),
             (ErrorKind::ProofStepFailed, "proof_step_failed"),
-            (ErrorKind::ProofTimeout, "proof_timeout"),
+            (ErrorKind::PetLost, "pet_lost"),
             (ErrorKind::ProjectTimeout, "project_timeout"),
             (ErrorKind::BuildTimeout, "build_timeout"),
             (
@@ -177,13 +176,13 @@ mod tests {
     }
 
     #[test]
-    fn only_pet_transport_loss_maps_release_to_proof_timeout() {
+    fn only_pet_transport_loss_maps_release_to_pet_lost() {
         for error in [
             PetError::ProcessLost("closed".into()),
             PetError::Protocol("invalid response".into()),
             PetError::OutputOverflow,
         ] {
-            assert_eq!(pet_release_error(error).kind, ErrorKind::ProofTimeout);
+            assert_eq!(pet_release_error(error).kind, ErrorKind::PetLost);
         }
         for error in [
             PetError::Invalid("bad state".into()),
@@ -248,7 +247,7 @@ mod tests {
         let session = Arc::clone(&server.session);
         let id = json!({"file":"A.v","qualified_path":["Demo","A","t"]});
         let root =
-            dispatch(&runtime, &session, "prove", json!({"declaration":id})).unwrap()["checkpoint"]
+            dispatch(&runtime, &session, "prove", json!({"target":id})).unwrap()["checkpoint"]
                 .as_u64()
                 .unwrap();
         let first = dispatch(
@@ -317,13 +316,7 @@ mod tests {
         let attached = session.project().unwrap();
 
         for _ in 0..10 {
-            dispatch(
-                &runtime,
-                &session,
-                "prove",
-                json!({"declaration":id.clone()}),
-            )
-            .unwrap();
+            dispatch(&runtime, &session, "prove", json!({"target":id.clone()})).unwrap();
             assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 1);
 
             let tried = dispatch(
@@ -346,7 +339,8 @@ mod tests {
                 json!({"attempts":["intros A. ThisCommandMustNotExist."]}),
             )
             .unwrap();
-            assert!(rejected["selected"].is_null());
+            assert!(rejected.get("selected").is_none());
+            assert!(rejected.get("error").is_none());
             assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 1);
 
             dispatch(
@@ -357,13 +351,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 2);
-            dispatch(
-                &runtime,
-                &session,
-                "abandon",
-                json!({"declaration":id.clone()}),
-            )
-            .unwrap();
+            dispatch(&runtime, &session, "abandon", json!({"target":id.clone()})).unwrap();
             assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 0);
         }
     }
@@ -404,7 +392,7 @@ mod tests {
             &runtime,
             &second.session,
             "prove",
-            json!({"declaration":{"file":"A.v","qualified_path":["Demo","A","a"]}}),
+            json!({"target":{"file":"A.v","qualified_path":["Demo","A","a"]}}),
         )
         .unwrap();
 
@@ -452,7 +440,7 @@ mod tests {
             &runtime,
             &server.session,
             "prove",
-            json!({"declaration":identity}),
+            json!({"target":identity}),
         )
         .unwrap();
 
@@ -511,7 +499,7 @@ mod tests {
                 &runtime,
                 &server.session,
                 "prove",
-                json!({"declaration":first_id.clone()}),
+                json!({"target":first_id.clone()}),
             )
             .unwrap();
         }
@@ -519,7 +507,7 @@ mod tests {
             &runtime,
             &second_a.session,
             "prove",
-            json!({"declaration":second_id}),
+            json!({"target":second_id}),
         )
         .unwrap();
 
@@ -579,7 +567,7 @@ mod tests {
                 &runtime,
                 &server.session,
                 "prove",
-                json!({"declaration":id.clone()}),
+                json!({"target":id.clone()}),
             )
             .unwrap();
             dispatch(
@@ -633,6 +621,52 @@ mod tests {
     }
 
     #[test]
+    fn post_selection_trust_failure_uses_the_sparse_error_variant() {
+        let project = dune_project(
+            "Demo",
+            &[(
+                "A.v",
+                "Theorem helper : True. Admitted.\nTheorem t : True. Admitted.\n",
+            )],
+        );
+        let runtime = runtime();
+        let server = attach(&runtime, &project);
+        let target = json!({"file":"A.v","qualified_path":["Demo","A","t"]});
+        dispatch(
+            &runtime,
+            &server.session,
+            "prove",
+            json!({"target":target.clone()}),
+        )
+        .unwrap();
+
+        let result = dispatch(
+            &runtime,
+            &server.session,
+            "check",
+            json!({"attempts":["exact helper."]}),
+        )
+        .unwrap();
+        assert_eq!(result["selected"], 0);
+        assert_eq!(result["error"]["kind"], "unfinished_dependency");
+        assert!(result.get("rejected").is_none());
+        assert_eq!(result["state"]["target"], target);
+        assert_eq!(result["state"]["status"], "Open");
+        assert!(result["state"].get("checkpoint").is_some());
+        assert_eq!(
+            fs::read_to_string(project.path().join("A.v")).unwrap(),
+            "Theorem helper : True. Admitted.\nTheorem t : True. Admitted.\n"
+        );
+        dispatch(
+            &runtime,
+            &server.session,
+            "abandon",
+            json!({"target":target}),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn failed_dune_refresh_retains_replayable_checkpoints() {
         let project = dune_project("Demo", &[("A.v", "Theorem t : True. Admitted.\n")]);
         let runtime = runtime();
@@ -642,7 +676,7 @@ mod tests {
             &runtime,
             &server.session,
             "prove",
-            json!({"declaration":id.clone()}),
+            json!({"target":id.clone()}),
         )
         .unwrap()["checkpoint"]
             .as_u64()
@@ -674,12 +708,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rewound["state"]["checkpoint"], root);
-        dispatch(
-            &runtime,
-            &server.session,
-            "abandon",
-            json!({"declaration":id}),
-        )
-        .unwrap();
+        dispatch(&runtime, &server.session, "abandon", json!({"target":id})).unwrap();
     }
 }

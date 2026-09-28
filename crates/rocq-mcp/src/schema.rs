@@ -46,7 +46,7 @@ pub fn tool_definitions() -> &'static [Tool] {
         // the wire schema flat and enforce kind-specific fields in dispatch.
         let query_schema = schema(
             json!({
-                "kind": {"enum": ["goals", "search", "statement", "proof", "definition", "assumptions", "dependencies", "type", "notations"]},
+                "kind": {"enum": ["goals", "search", "about", "print", "assumptions", "dependencies", "type", "notations"]},
                 "target": declaration_id,
                 "at": declaration_id,
                 "expression": s,
@@ -81,22 +81,11 @@ pub fn tool_definitions() -> &'static [Tool] {
             ),
             (
                 "prove",
-                schema(
-                    json!({"declaration":{
-                        "type":"object",
-                        "properties":{
-                            "file":s,
-                            "qualified_path":{"type":"array","items":s,"minItems":1}
-                        },
-                        "required":["file","qualified_path"],
-                        "additionalProperties":false
-                    }}),
-                    &["declaration"],
-                ),
+                schema(json!({"target":declaration_id.clone()}), &["target"]),
             ),
             (
                 "abandon",
-                schema(json!({"declaration":declaration_id}), &["declaration"]),
+                schema(json!({"target":declaration_id}), &["target"]),
             ),
             (
                 "check",

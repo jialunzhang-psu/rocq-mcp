@@ -353,7 +353,7 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 
 fn refresh_error(error: crate::pet::PetError) -> Error {
     let kind = if error.lost() {
-        ErrorKind::ProofTimeout
+        ErrorKind::PetLost
     } else {
         ErrorKind::InvalidConfiguration
     };

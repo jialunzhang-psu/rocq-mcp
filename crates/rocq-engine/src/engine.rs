@@ -183,10 +183,9 @@ impl Engine {
 
     /// Validate a new declaration header at PET's exact module insertion state.
     ///
-    /// `file` is a Dune-selected source identity. `name` may be local,
-    /// module-qualified, or fully compilation-unit-qualified; the logical
-    /// library is derived exclusively from Dune. Disk is untouched until
-    /// publication.
+    /// `file` is a Dune-selected source identity. `name` is local or
+    /// nested-module-qualified relative to the compilation unit; Dune alone
+    /// supplies the logical prefix. Disk is untouched until publication.
     pub fn declare(
         &self,
         project: &DuneProject,
@@ -853,8 +852,8 @@ fn relative_path<'a>(
 }
 
 /// Form one declaration identity from Dune's compilation unit and a caller
-/// name. A matching full prefix is accepted for convenience, but Dune remains
-/// the sole owner of that prefix and it is never accepted as separate input.
+/// name that is strictly relative to it. Repeating Dune's prefix is rejected
+/// rather than normalized, so there is exactly one owner and one input form.
 fn declared_identity(
     file: FileId,
     library: &LogicalLibrary,
@@ -867,28 +866,17 @@ fn declared_identity(
             "name contains an empty component",
         ));
     }
-    let relative = if parts.starts_with(&library.0) {
-        let relative = &parts[library.0.len()..];
-        if relative.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidDeclaration,
-                "name does not contain a declaration",
-            ));
-        }
-        relative
-    } else {
-        // Design note: a dotted name without the Dune prefix is a local
-        // nested-module path, not an alternative logical-library authority.
-        &parts
-    };
+    if parts.starts_with(&library.0) {
+        return Err(Error::new(
+            ErrorKind::InvalidDeclaration,
+            "name must not repeat its Dune compilation-unit prefix",
+        ));
+    }
+    // Design note: every dotted input is a local nested-module path. Dune is
+    // the only source of the compilation-unit prefix prepended below.
     Ok(DeclarationIdentity {
         file,
-        qualified_path: library
-            .0
-            .iter()
-            .cloned()
-            .chain(relative.iter().cloned())
-            .collect(),
+        qualified_path: library.0.iter().cloned().chain(parts).collect(),
     })
 }
 
@@ -1036,30 +1024,30 @@ fn locate_constant(report: &str) -> Option<String> {
 
 fn declaration_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
-        error if error.lost() => ErrorKind::ProofTimeout,
+        error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
         pet::PetError::Invalid(_) | pet::PetError::Remote { .. } => ErrorKind::InvalidDeclaration,
-        pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::ProofTimeout,
-        pet::PetError::ProcessLost(_) => ErrorKind::ProofTimeout,
+        pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
+        pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
     Error::new(kind, error.to_string())
 }
 
 fn step_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
-        error if error.lost() => ErrorKind::ProofTimeout,
+        error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
         pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
         pet::PetError::Remote { .. } => ErrorKind::ProofStepFailed,
-        pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::ProofTimeout,
-        pet::PetError::ProcessLost(_) => ErrorKind::ProofTimeout,
+        pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
+        pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
     Error::new(kind, error.to_string())
 }
 
 fn query_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
-        error if error.lost() => ErrorKind::ProofTimeout,
+        error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
         pet::PetError::Environment(_)
         | pet::PetError::Remote { .. }
@@ -1075,29 +1063,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn declared_identity_uses_exactly_one_dune_library_prefix() {
+    fn declared_identity_accepts_only_compilation_unit_relative_names() {
         let library = LogicalLibrary(vec!["Demo".into(), "Main".into()]);
         let file = FileId("Main.v".into());
         for (name, expected) in [
             ("fresh", vec!["Demo", "Main", "fresh"]),
             ("Nested.fresh", vec!["Demo", "Main", "Nested", "fresh"]),
-            ("Demo.Main.fresh", vec!["Demo", "Main", "fresh"]),
         ] {
             let identity = declared_identity(file.clone(), &library, name).unwrap();
             assert_eq!(identity.qualified_path, expected);
         }
-        assert_eq!(
-            declared_identity(file.clone(), &library, "Demo.Main")
-                .unwrap_err()
-                .kind,
-            ErrorKind::InvalidDeclaration
-        );
-        assert_eq!(
-            declared_identity(file, &library, "Nested..fresh")
-                .unwrap_err()
-                .kind,
-            ErrorKind::InvalidDeclaration
-        );
+        for name in ["Demo.Main.fresh", "Demo.Main", "Nested..fresh"] {
+            assert_eq!(
+                declared_identity(file.clone(), &library, name)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::InvalidDeclaration
+            );
+        }
     }
 
     fn declaration(name: &str, start: usize, end: usize) -> pet::PetDeclaration {

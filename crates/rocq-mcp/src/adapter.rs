@@ -25,7 +25,7 @@ pub(crate) fn public_error(error: &Error) -> Value {
         ErrorKind::Ambiguous => "ambiguous",
         ErrorKind::DeclarationChanged => "declaration_changed",
         ErrorKind::ProofStepFailed => "proof_step_failed",
-        ErrorKind::ProofTimeout => "proof_timeout",
+        ErrorKind::PetLost => "pet_lost",
         ErrorKind::ProjectTimeout => "project_timeout",
         ErrorKind::BuildTimeout => "build_timeout",
         ErrorKind::AxiomDependencyOutOfScope => "axiom_dependency_out_of_scope",
@@ -36,8 +36,7 @@ pub(crate) fn public_error(error: &Error) -> Value {
 
 fn state_json(state: &ProofState, checkpoint: Option<CheckpointId>) -> Value {
     let mut value = json!({
-        "theorem": state.theorem.identity.qualified_name(),
-        "statement": state.theorem.statement,
+        "target": declaration_identity_json(&state.theorem.identity),
         "status": format!("{:?}", state.lifecycle),
         "goals": state.goals,
     });
@@ -47,36 +46,50 @@ fn state_json(state: &ProofState, checkpoint: Option<CheckpointId>) -> Value {
     value
 }
 
+/// Project one canonical declaration identity into the reusable public wire
+/// shape. Proof-state responses deliberately contain no second, lossy name.
+fn declaration_identity_json(identity: &DeclarationIdentity) -> Value {
+    json!({
+        "file": identity.file.0,
+        "qualified_path": identity.qualified_path,
+    })
+}
+
 fn declaration_json(declaration: &DeclarationInfo) -> Value {
     json!({
-        "id": {
-            "file": declaration.identity.file.0,
-            "qualified_path": declaration.identity.qualified_path,
-        },
+        "id": declaration_identity_json(&declaration.identity),
         "name": declaration.identity.qualified_name(),
         "statement": declaration.statement,
         "kind": format!("{:?}", declaration.kind),
     })
 }
 
-fn declaration_id(value: &Value) -> Result<DeclarationIdentity, Error> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "declaration must be an object"))?;
+fn declaration_id(value: &Value, field: &str) -> Result<DeclarationIdentity, Error> {
+    let object = value.as_object().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidRequest,
+            format!("{field} must be an object"),
+        )
+    })?;
     if object
         .keys()
         .any(|key| !matches!(key.as_str(), "file" | "qualified_path"))
     {
         return Err(Error::new(
             ErrorKind::InvalidRequest,
-            "declaration has an unknown field",
+            format!("{field} has an unknown field"),
         ));
     }
     let file = object
         .get("file")
         .and_then(Value::as_str)
         .filter(|file| !file.is_empty())
-        .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "declaration.file is required"))?;
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidRequest,
+                format!("{field}.file is required"),
+            )
+        })?;
     let qualified_path = object
         .get("qualified_path")
         .and_then(Value::as_array)
@@ -84,7 +97,7 @@ fn declaration_id(value: &Value) -> Result<DeclarationIdentity, Error> {
         .ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidRequest,
-                "declaration.qualified_path is required",
+                format!("{field}.qualified_path is required"),
             )
         })?
         .iter()
@@ -165,7 +178,7 @@ pub(crate) fn dispatch(
     let result = dispatch_attached(runtime, session, &project, &mut selection, name, &args);
     if result
         .as_ref()
-        .is_err_and(|error| error.kind == ErrorKind::ProofTimeout)
+        .is_err_and(|error| error.kind == ErrorKind::PetLost)
     {
         runtime.invalidate_project_states(&project, session, &mut selection);
     }
@@ -189,7 +202,7 @@ fn start(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Err(error) = retire_proof(&previous, &mut selection) {
-                if error.kind == ErrorKind::ProofTimeout {
+                if error.kind == ErrorKind::PetLost {
                     runtime.invalidate_project_states(&previous, session, &mut selection);
                 }
                 return Err(error);
@@ -207,7 +220,7 @@ fn start(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(error) = retire_proof(&previous, &mut selection) {
-            if error.kind == ErrorKind::ProofTimeout {
+            if error.kind == ErrorKind::PetLost {
                 runtime.invalidate_project_states(&previous, session, &mut selection);
             }
             return Err(error);
@@ -277,11 +290,13 @@ fn dispatch_attached(
             }))
         }
         "prove" => {
-            reject_unknown(args, &["declaration"])?;
-            let identity = declaration_id(args.get("declaration").ok_or_else(|| {
-                Error::new(ErrorKind::InvalidRequest, "declaration is required")
-            })?)?;
-            retire_proof(project, selection)?;
+            reject_unknown(args, &["target"])?;
+            let identity = declaration_id(
+                args.get("target")
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "target is required"))?,
+                "target",
+            )?;
+            reject_active_proof(selection, "prove")?;
             match engine.open_declaration(project.project(), project.actor(), identity)? {
                 OpenResult::Published(target) => {
                     runtime.invalidate_project_states(project, session, selection);
@@ -298,7 +313,7 @@ fn dispatch_attached(
             let file = FileId(required_string(args, "file")?.replace('\\', "/"));
             let kind = declaration_kind(args.get("kind").and_then(Value::as_str))?;
             let statement = required_string(args, "statement")?;
-            retire_proof(project, selection)?;
+            reject_active_proof(selection, "declare")?;
             let opened = engine.declare(
                 project.project(),
                 project.actor(),
@@ -310,10 +325,12 @@ fn dispatch_attached(
             begin_proof(project, selection, opened)
         }
         "abandon" => {
-            reject_unknown(args, &["declaration"])?;
-            let identity = declaration_id(args.get("declaration").ok_or_else(|| {
-                Error::new(ErrorKind::InvalidRequest, "declaration is required")
-            })?)?;
+            reject_unknown(args, &["target"])?;
+            let identity = declaration_id(
+                args.get("target")
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "target is required"))?,
+                "target",
+            )?;
             let proof = selection
                 .checkpoints
                 .proof
@@ -360,6 +377,18 @@ fn begin_proof(
     Ok(state_json(&view, Some(checkpoint)))
 }
 
+/// Reject proof replacement without touching the active checkpoint graph or
+/// its PET states. The caller must explicitly abandon the selected proof.
+fn reject_active_proof(selection: &Selection, operation: &str) -> Result<(), Error> {
+    if selection.checkpoints.proof.is_some() {
+        return Err(Error::new(
+            ErrorKind::InvalidRequest,
+            format!("abandon the active proof before calling {operation}"),
+        ));
+    }
+    Ok(())
+}
+
 fn check(
     runtime: &Arc<ServerRuntime>,
     session: &Arc<SessionCell>,
@@ -403,12 +432,12 @@ fn check(
                     }
                 };
                 if !step.finished {
-                    return Ok(json!({
-                        "selected": index,
-                        "state": state_json(&step.view, Some(checkpoint)),
-                        "rejected": rejected,
-                        "error": null,
-                    }));
+                    return Ok(selected_result(
+                        index,
+                        &step.view,
+                        Some(checkpoint),
+                        rejected,
+                    ));
                 }
                 let path = selection
                     .checkpoints
@@ -420,7 +449,7 @@ fn check(
                     &target,
                     step.state,
                 ) {
-                    if error.kind == ErrorKind::ProofTimeout {
+                    if error.kind == ErrorKind::PetLost {
                         runtime.invalidate_project_states(project, session, selection);
                     }
                     return Ok(selected_error(
@@ -440,12 +469,7 @@ fn check(
                 ) {
                     Ok(state) => {
                         selection.checkpoints.clear();
-                        return Ok(json!({
-                            "selected": index,
-                            "state": state_json(&state, None),
-                            "rejected": rejected,
-                            "error": null,
-                        }));
+                        return Ok(selected_result(index, &state, None, rejected));
                     }
                     Err(error) => {
                         let checkpoint = if error.kind == ErrorKind::DeclarationChanged {
@@ -471,11 +495,25 @@ fn check(
         .lookup(base_id)
         .map_err(checkpoint_error)?;
     Ok(json!({
-        "selected": null,
         "state": state_json(&checkpoint.view, Some(base_id)),
         "rejected": rejected,
-        "error": null,
     }))
+}
+
+fn selected_result(
+    selected: usize,
+    state: &ProofState,
+    checkpoint: Option<CheckpointId>,
+    rejected: Vec<Value>,
+) -> Value {
+    let mut result = json!({
+        "selected": selected,
+        "state": state_json(state, checkpoint),
+    });
+    if !rejected.is_empty() {
+        result["rejected"] = json!(rejected);
+    }
+    result
 }
 
 fn selected_error(
@@ -485,12 +523,15 @@ fn selected_error(
     rejected: Vec<Value>,
     error: &Error,
 ) -> Value {
-    json!({
+    let mut result = json!({
         "selected": selected,
         "state": state_json(state, checkpoint),
-        "rejected": rejected,
         "error": public_error(error),
-    })
+    });
+    if !rejected.is_empty() {
+        result["rejected"] = json!(rejected);
+    }
+    result
 }
 
 fn try_fragments(
@@ -524,12 +565,11 @@ fn try_fragments(
                     .actor()
                     .release_states(&[step.state])
                     .map_err(pet_release_error)?;
-                output.push(json!({"solved": step.finished, "state": state, "error": null}));
+                output.push(json!({"solved": step.finished, "state": state}));
             }
             Err(error) if error.kind == ErrorKind::ProofStepFailed => {
                 output.push(json!({
                     "solved": false,
-                    "state": null,
                     "error": public_error(&error),
                 }));
             }
@@ -620,17 +660,18 @@ fn query(
             let view = engine.goals(project.project(), project.actor(), &proof.target, state)?;
             Ok(state_json(&view, Some(checkpoint)))
         }
-        "statement" | "proof" | "definition" | "assumptions" | "dependencies" => {
+        "about" | "print" | "assumptions" | "dependencies" => {
             reject_unknown(args, &["kind", "target", "offset"])?;
             let offset = query_offset(args)?;
             let identity = declaration_id(
                 args.get("target")
                     .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "target is required"))?,
+                "target",
             )?;
             let name = identity.qualified_name();
             let query = match kind {
-                "statement" => PetQuery::About(name),
-                "proof" | "definition" => PetQuery::Print(name),
+                "about" => PetQuery::About(name),
+                "print" => PetQuery::Print(name),
                 "assumptions" => PetQuery::Assumptions(name),
                 "dependencies" => PetQuery::Dependencies(name),
                 _ => unreachable!(),
@@ -672,6 +713,15 @@ fn query(
                 "notations" => PetQuery::Notation(required_string(args, "expression")?),
                 _ => unreachable!(),
             };
+            // Design note: `at` is an explicit context selector, so it must
+            // override rather than be shadowed by an active proof.
+            if let Some(at) = args.get("at") {
+                let identity = declaration_id(at, "at")?;
+                return text_result(
+                    engine.query_at(project.project(), project.actor(), &identity, query)?,
+                    offset,
+                );
+            }
             if selection.checkpoints.proof.is_some() {
                 let (_, state) = ensure_current_state(engine, project, selection)?;
                 let proof = selection.checkpoints.proof.as_ref().unwrap();
@@ -686,16 +736,10 @@ fn query(
                     offset,
                 );
             }
-            let identity = declaration_id(args.get("at").ok_or_else(|| {
-                Error::new(
-                    ErrorKind::InvalidRequest,
-                    "at is required when no proof is selected",
-                )
-            })?)?;
-            text_result(
-                engine.query_at(project.project(), project.actor(), &identity, query)?,
-                offset,
-            )
+            Err(Error::new(
+                ErrorKind::InvalidRequest,
+                "at is required when no proof is selected",
+            ))
         }
         _ => Err(Error::new(
             ErrorKind::InvalidRequest,
@@ -966,7 +1010,7 @@ pub(crate) fn pet_release_error(error: rocq_engine::pet::PetError) -> Error {
     // configuration failure; reporting it as transport loss would make the
     // dispatcher erase replayable checkpoints while retaining the child.
     let kind = if error.is_transport_loss() {
-        ErrorKind::ProofTimeout
+        ErrorKind::PetLost
     } else {
         ErrorKind::InvalidConfiguration
     };
