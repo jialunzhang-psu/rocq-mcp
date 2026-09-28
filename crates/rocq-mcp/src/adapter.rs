@@ -38,8 +38,15 @@ fn state_json(state: &ProofState, checkpoint: Option<CheckpointId>) -> Value {
     let mut value = json!({
         "target": declaration_identity_json(&state.theorem.identity),
         "status": format!("{:?}", state.lifecycle),
-        "goals": state.goals,
     });
+    // Design note: an empty goal rendering carries no information after PET
+    // has reported completion (or for a hypothetical solved `try` result).
+    // Keep the wire state sparse; `try.solved` remains the explicit marker for
+    // a hypothetical terminal result because its status intentionally stays
+    // `Open` until `check` publishes it.
+    if !state.goals.is_empty() {
+        value["goals"] = json!(state.goals);
+    }
     if let Some(checkpoint) = checkpoint {
         value["checkpoint"] = json!(checkpoint.get());
     }
@@ -58,7 +65,6 @@ fn declaration_identity_json(identity: &DeclarationIdentity) -> Value {
 fn declaration_json(declaration: &DeclarationInfo) -> Value {
     json!({
         "id": declaration_identity_json(&declaration.identity),
-        "name": declaration.identity.qualified_name(),
         "statement": declaration.statement,
         "kind": format!("{:?}", declaration.kind),
     })
@@ -208,7 +214,7 @@ fn start(
                 return Err(error);
             }
             install_start_view(runtime, session, &next, &mut selection)?;
-            return Ok(json!({"attached": true}));
+            return Ok(json!({}));
         }
 
         // Never hold two project operation barriers at once: sessions may
@@ -234,7 +240,7 @@ fn start(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     install_start_view(runtime, session, &next, &mut selection)?;
-    Ok(json!({"attached": true}))
+    Ok(json!({}))
 }
 
 /// Admit one freshly attached Dune view under the target project's operation
@@ -282,10 +288,6 @@ fn dispatch_attached(
             let file = FileId(required_string(args, "file")?.replace('\\', "/"));
             let declarations = engine.list_decls(project.project(), project.actor(), &file)?;
             Ok(json!({
-                // Design note: echo the normalized public FileId rather than
-                // the caller's platform spelling, so every returned identity
-                // can be reused byte-for-byte in later calls.
-                "file": file.0,
                 "declarations": declarations.iter().map(declaration_json).collect::<Vec<_>>(),
             }))
         }
@@ -343,7 +345,7 @@ fn dispatch_attached(
                 ));
             }
             retire_proof(project, selection)?;
-            Ok(json!({"abandoned": identity.qualified_name()}))
+            Ok(json!({}))
         }
         "check" => check(runtime, session, project, selection, args),
         "try" => try_fragments(engine, project, selection, args),
@@ -639,7 +641,7 @@ fn rewind(
         .checkpoints
         .lookup(target)
         .map_err(checkpoint_error)?;
-    Ok(json!({"state": state_json(&checkpoint.view, Some(target))}))
+    Ok(state_json(&checkpoint.view, Some(target)))
 }
 
 fn query(
@@ -769,9 +771,10 @@ fn query_offset(args: &Value) -> Result<usize, Error> {
 ///
 /// `offset` is a UTF-8 byte boundary previously returned as `next_offset`.
 /// Small first pages preserve the original `{text}` shape. Paged responses
-/// additionally report the exact offset and total byte length, plus
-/// `next_offset` when another page exists. Invalid or stale offsets fail
-/// without retaining any wrapper-side query state.
+/// add only `next_offset` when another page exists. Invalid or stale offsets
+/// fail without retaining any wrapper-side query state. The request already
+/// carries the current offset, so the response exposes only the continuation
+/// token.
 fn text_result(text: String, offset: usize) -> Result<Value, Error> {
     let length = text.len();
     if offset > length || !text.is_char_boundary(offset) || (offset == length && !text.is_empty()) {
@@ -787,11 +790,7 @@ fn text_result(text: String, offset: usize) -> Result<Value, Error> {
     while end > offset && !text.is_char_boundary(end) {
         end -= 1;
     }
-    let mut result = json!({
-        "text": &text[offset..end],
-        "offset": offset,
-        "total_bytes": length,
-    });
+    let mut result = json!({"text": &text[offset..end]});
     if end < length {
         result["next_offset"] = json!(end);
     }
@@ -1026,15 +1025,16 @@ mod tests {
         let text = format!("{}🦀tail", "a".repeat(QUERY_PAGE_BYTES - 1));
         let first = text_result(text.clone(), 0).unwrap();
         assert_eq!(first["text"].as_str().unwrap().len(), QUERY_PAGE_BYTES - 1);
-        assert_eq!(first["offset"], 0);
         assert_eq!(first["next_offset"], QUERY_PAGE_BYTES - 1);
-        assert_eq!(first["total_bytes"], text.len());
+        assert!(first.get("offset").is_none());
+        assert!(first.get("total_bytes").is_none());
 
         let offset = first["next_offset"].as_u64().unwrap() as usize;
         let second = text_result(text.clone(), offset).unwrap();
         assert_eq!(second["text"], "🦀tail");
-        assert_eq!(second["offset"], offset);
         assert!(second.get("next_offset").is_none());
+        assert!(second.get("offset").is_none());
+        assert!(second.get("total_bytes").is_none());
 
         let middle_of_crab = offset + 1;
         assert_eq!(

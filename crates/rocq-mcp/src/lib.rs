@@ -274,17 +274,12 @@ mod tests {
 
         let first_view =
             dispatch(&runtime, &session, "rewind", json!({"checkpoint":first})).unwrap();
-        assert_eq!(first_view["state"]["checkpoint"], first);
-        assert!(
-            first_view["state"]["goals"]
-                .as_str()
-                .unwrap()
-                .contains("C : Prop")
-        );
+        assert_eq!(first_view["checkpoint"], first);
+        assert!(first_view["goals"].as_str().unwrap().contains("C : Prop"));
         let second_view =
             dispatch(&runtime, &session, "rewind", json!({"checkpoint":second})).unwrap();
-        assert_eq!(second_view["state"]["checkpoint"], second);
-        let second_goals = second_view["state"]["goals"].as_str().unwrap();
+        assert_eq!(second_view["checkpoint"], second);
+        let second_goals = second_view["goals"].as_str().unwrap();
         assert!(second_goals.contains("A B C : Prop"), "{second_goals}");
         assert!(second_goals.contains("A -> B -> C -> A"), "{second_goals}");
         assert!(
@@ -707,7 +702,7 @@ mod tests {
             json!({"checkpoint":root}),
         )
         .unwrap();
-        assert_eq!(rewound["state"]["checkpoint"], root);
+        assert_eq!(rewound["checkpoint"], root);
         dispatch(&runtime, &server.session, "abandon", json!({"target":id})).unwrap();
     }
 }

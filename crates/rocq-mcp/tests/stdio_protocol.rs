@@ -204,7 +204,7 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     );
 
     let one_back = call_tool(&mut input, &mut output, 7, "rewind", serde_json::json!({}));
-    assert_eq!(one_back["structuredContent"]["state"]["checkpoint"], root);
+    assert_eq!(one_back["structuredContent"]["checkpoint"], root);
     assert!(one_back["structuredContent"].get("rewound_from").is_none());
     assert!(one_back["structuredContent"].get("rewound_to").is_none());
 
@@ -244,7 +244,7 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
         "rewind",
         serde_json::json!({"steps":2}),
     );
-    assert_eq!(two_back["structuredContent"]["state"]["checkpoint"], first);
+    assert_eq!(two_back["structuredContent"]["checkpoint"], first);
 
     let exact_old_suffix = call_tool(
         &mut input,
@@ -253,10 +253,7 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
         "rewind",
         serde_json::json!({"checkpoint":third}),
     );
-    assert_eq!(
-        exact_old_suffix["structuredContent"]["state"]["checkpoint"],
-        third
-    );
+    assert_eq!(exact_old_suffix["structuredContent"]["checkpoint"], third);
 
     let _ = call_tool(
         &mut input,
@@ -283,7 +280,7 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
         serde_json::json!({"checkpoint":third}),
     );
     assert_eq!(
-        old_branch["structuredContent"]["state"]["checkpoint"], third,
+        old_branch["structuredContent"]["checkpoint"], third,
         "rewinding must preserve the old branch"
     );
 
@@ -356,6 +353,11 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     assert_eq!(
         completed["structuredContent"]["state"]["status"], "Completed",
         "{completed}"
+    );
+    assert!(
+        completed["structuredContent"]["state"]
+            .get("goals")
+            .is_none()
     );
     assert!(
         completed["structuredContent"]["state"]
@@ -439,7 +441,8 @@ fn start_survives_a_competing_dune_build() {
     assert_eq!(response["id"], 2);
     assert_eq!(response["result"]["isError"], false, "{response}");
     assert_eq!(
-        response["result"]["structuredContent"]["attached"], true,
+        response["result"]["structuredContent"],
+        serde_json::json!({}),
         "{response}"
     );
     drop(input);
@@ -507,9 +510,22 @@ fn absolute_custom_dune_build_dir_survives_start_and_proof_publication() {
         let response: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["result"]["isError"], false, "{name}: {response}");
         if name == "start" {
-            assert_eq!(response["result"]["structuredContent"]["attached"], true);
+            assert_eq!(
+                response["result"]["structuredContent"],
+                serde_json::json!({})
+            );
         }
         if name == "list_decls" {
+            assert!(
+                response["result"]["structuredContent"]
+                    .get("file")
+                    .is_none()
+            );
+            assert!(
+                response["result"]["structuredContent"]["declarations"][0]
+                    .get("name")
+                    .is_none()
+            );
             assert_eq!(
                 response["result"]["structuredContent"]["declarations"]
                     .as_array()
@@ -755,10 +771,7 @@ fn abandon_discards_an_open_declaration_and_allows_redeclaration() {
         serde_json::json!({"target":{"file":"Main.v","qualified_path":["Demo","Main","fresh"]}}),
     );
     assert_eq!(abandoned["isError"], false, "{abandoned}");
-    assert_eq!(
-        abandoned["structuredContent"]["abandoned"],
-        "Demo.Main.fresh"
-    );
+    assert_eq!(abandoned["structuredContent"], serde_json::json!({}));
     let redeclared = call_tool(
         &mut input,
         &mut output,

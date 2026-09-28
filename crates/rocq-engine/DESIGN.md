@@ -353,9 +353,10 @@ Public status remains only `Open` or `Completed`. There is no `SourceClosed`,
 `Pending`, or wrapper-guessed completion state. `pet_finished` means that PET
 accepted a terminal proof state; `Completed` additionally requires successful
 publication, Dune validation, and the configured PET trust audit. Every public
-proof-state view carries the exact reusable `DeclarationId` as `target`, plus
-`status`, `goals`, and an optional selected `checkpoint`; it has no parallel
-string theorem name or repeated statement.
+proof-state view carries the exact reusable `DeclarationId` as `target` and
+`status`; open states carry `goals` and an optional selected `checkpoint`.
+Completed and hypothetical solved views omit their empty goals field. There is
+no parallel string theorem name or repeated statement.
 
 ## 8. PET state ID lifecycle
 
@@ -604,8 +605,10 @@ Return Dune-selected workspace-relative `FileId` values. Do not invoke PET.
 ### `list_decls(file)`
 
 Validate `file` against Dune and make exactly one PET document-declaration
-request. Return PET's canonical identities, kinds, statements, and ranges. Do
-not inspect unrelated files.
+request. Return PET's canonical identities, kinds, and statements. The
+qualified name is not copied into a second field, and the requested file is
+not echoed because it is already part of every identity. Do not inspect
+unrelated files.
 
 ### `prove(target)`
 
@@ -671,7 +674,9 @@ exists. `search` is Rocq `Search`, not a wrapper metadata search.
 The MCP boundary, not the engine, bounds materialized text to 32 KiB UTF-8
 pages. Continuation is one integer byte offset returned by the preceding page;
 the server retains no query cursor and never interprets or reimplements PET's
-text. Unpaged small results preserve the original `{text}` response.
+text. Responses contain `text` and, only when more data remains,
+`next_offset`; the request already identifies the current offset, so it is not
+echoed and no total byte count is maintained.
 
 ### `abandon`
 

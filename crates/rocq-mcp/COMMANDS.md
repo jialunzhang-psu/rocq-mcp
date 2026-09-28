@@ -1,14 +1,17 @@
 # MCP tools
 
-Each call is `{"tool":"<name>","args":{...}}`. The server exposes ten
-tools. There are no public cursors, session IDs, or publication commands. Files
+Examples below use the compact command notation
+`{"tool":"<name>","args":{...}}`; on the MCP wire this is a
+`tools/call` request whose `params` are `{"name":"<name>","arguments":{...}}`.
+The server exposes ten tools. There are no public cursors, session IDs, or publication commands. Files
 are workspace-relative `FileId` values; declarations are PET-backed
-`DeclarationId` objects. A declaration listing has an id, name, kind, and
-statement; proof status is supplied by PET-backed proof operations. A proof
-state has the exact reusable `target` `DeclarationId`, `status`, and `goals`.
-An open, selected state also has a session-local integer `checkpoint`. Status
-is `Open` or `Completed`; proof states do not duplicate the target as a string
-or repeat its source statement.
+`DeclarationId` objects. A declaration listing has an id, kind, and statement;
+the qualified name is already encoded by the id. Proof status is supplied by
+PET-backed proof operations. A proof state has the exact reusable `target`
+`DeclarationId` and `status`; a nonterminal open state additionally has
+`goals`, and an open selected state also has a session-local integer
+`checkpoint`. Status is `Open` or `Completed`; proof states do not duplicate
+the target as a string or repeat its source statement.
 `Completed` is returned only after PET reports a proved terminal AST, Dune/Rocq
 successfully builds the source, and PET's `Print Assumptions` output passes the
 wrapper's trust policy. The wrapper never infers completion from source text.
@@ -29,7 +32,7 @@ a protocol failure.
 {"tool":"start","args":{"project_path":"./project"}}
 ```
 
-Returns `{"attached":true}`. It only attaches the Dune workspace and does not
+Returns `{}`. It only attaches the Dune workspace and does not
 start a workspace-wide PET declaration index. Call `list_files`, then
 `list_decls(file)` to discover a target. Every call obtains a fresh typed Dune
 view under the shared project barrier. Reattaching the same workspace retires
@@ -60,10 +63,12 @@ This operation re-queries Dune, but does not invoke PET or parse source files.
 
 Asks PET once for the document declarations of exactly one Dune-selected
 source. Each declaration has an `id` containing the relative `file` and PET's
-complete `qualified_path`. Duplicate leaves in different nested modules remain
-distinct. The wrapper does not reconstruct module scopes or issue per-sentence
-AST requests, and it does not index unrelated workspace files. The returned
-`file` and every declaration ID use normalized `/` separators.
+complete `qualified_path`, plus its statement and kind. Duplicate leaves in
+different nested modules remain distinct. The wrapper does not reconstruct
+module scopes or issue per-sentence AST requests, and it does not index
+unrelated workspace files. Every declaration ID uses normalized `/`
+separators; the request's `file` is not echoed because it is already present in
+each returned ID, and the qualified name is not duplicated as a second string.
 
 ## `query`
 
@@ -95,7 +100,7 @@ returns Rocq's printed term, not the original tactic script. `goals` returns a
 proof state. Other variants return
 `{"text":"<Rocq output>"}` when the complete result fits in 32 KiB. Larger
 results are split at UTF-8 boundaries and return
-`{"text":"...","offset":0,"total_bytes":N,"next_offset":K}`. Pass the
+`{"text":"...","next_offset":K}` when another page exists. Pass the
 returned `next_offset` unchanged as the next request's `offset`; the last page
 omits `next_offset`. Offsets count raw UTF-8 bytes, and callers must not invent
 or adjust them. Paging is stateless: PET recomputes the same semantic query,
@@ -183,8 +188,8 @@ it; call `abandon` explicitly.
 ```
 
 Discards one uniquely identified unpublished proof. Its in-memory proof session
-and PET state handles are retired; it never deletes source code. Returns
-`{"abandoned":"Demo.new_t"}` and clears the connection's selected proof.
+and PET state handles are retired; it never deletes source code. Returns `{}`
+and clears the connection's selected proof.
 
 | Error kind | When |
 |---|---|
@@ -261,7 +266,9 @@ Returns accepted entries as
 `{"solved":<boolean>,"state":<hypothetical proof state>}` and rejected entries as
 `{"solved":false,"error":<error>}` in input order. A rejected fragment
 exposes no partial-prefix state and has its own `proof_step_failed` or other
-typed error. Hypothetical states never contain a checkpoint.
+typed error. Hypothetical states never contain a checkpoint; a solved
+hypothetical state omits its empty `goals` field, while `solved:true` remains
+the explicit indication that the fragment would close the proof.
 
 | Top-level error kind | When |
 |---|---|
@@ -291,10 +298,10 @@ The operation validates the source digest and current Dune source selection,
 replays the selected checkpoint path in PET when its cached state is not available, and
 changes the selected checkpoint only after validation/replay succeeds.
 
-Returns:
+Returns the proof state directly:
 
 ```json
-{"state":<proof state>}
+<proof state>
 ```
 
 It never edits source, runs a native build, or invokes writeback; Dune is used
