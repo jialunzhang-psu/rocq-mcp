@@ -26,6 +26,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "release_states_v1",
     "refresh_workspace_v1",
     "structured_assumptions_v1",
+    "typed_errors_v1",
 ];
 
 fn configured_pet_binary() -> PathBuf {
@@ -49,9 +50,47 @@ impl PetStateId {
     }
 }
 
-/// Failures distinguish semantic PET rejection from transport loss. The MCP
-/// coordinator uses `ProcessLost` to clear every checkpoint for this project
-/// before starting a replacement process.
+/// Stable classification of a PET JSON-RPC error code.  The numeric code and
+/// original message remain on [`PetError::Remote`]; this enum is the only
+/// value used for operation-level semantics, so localized diagnostics never
+/// become a hidden protocol parser.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PetRemoteKind {
+    /// JSON-RPC method mismatch: the configured PET does not implement the
+    /// required capability surface.
+    MethodNotFound,
+    Interrupted,
+    Parsing,
+    Coq,
+    Anomaly,
+    System,
+    TheoremNotFound,
+    NoNodeAtPoint,
+    ReferenceNotFound,
+    Unknown(i64),
+}
+
+impl PetRemoteKind {
+    fn from_code(code: i64) -> Self {
+        match code {
+            -32601 => Self::MethodNotFound,
+            -32001 => Self::Interrupted,
+            -32002 => Self::Parsing,
+            -32003 => Self::Coq,
+            -32004 => Self::Anomaly,
+            -32005 => Self::System,
+            -32006 => Self::TheoremNotFound,
+            -32007 => Self::NoNodeAtPoint,
+            -32008 => Self::ReferenceNotFound,
+            code => Self::Unknown(code),
+        }
+    }
+}
+
+/// PET client failures are separated into local validation, project setup,
+/// semantic remote rejection, and transport loss.  The MCP coordinator uses
+/// transport loss to clear every checkpoint for the affected project before a
+/// replacement process is admitted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PetError {
     Invalid(String),
@@ -59,7 +98,11 @@ pub enum PetError {
     ProcessLost(String),
     Protocol(String),
     OutputOverflow,
-    Remote { code: i64, message: String },
+    Remote {
+        code: i64,
+        kind: PetRemoteKind,
+        message: String,
+    },
 }
 
 impl PetError {
@@ -70,6 +113,19 @@ impl PetError {
         matches!(
             self,
             Self::ProcessLost(_) | Self::Protocol(_) | Self::OutputOverflow
+        )
+    }
+
+    /// Whether PET reported an internal/system failure while the JSON-RPC
+    /// transport itself remained usable.  Callers must not label this as a
+    /// user project configuration error.
+    pub fn is_internal_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Remote {
+                kind: PetRemoteKind::Anomaly | PetRemoteKind::System | PetRemoteKind::Unknown(_),
+                ..
+            }
         )
     }
 
@@ -85,7 +141,9 @@ impl std::fmt::Display for PetError {
             Self::Environment(message) | Self::ProcessLost(message) => f.write_str(message),
             Self::Protocol(message) => write!(f, "PET protocol failure: {message}"),
             Self::OutputOverflow => f.write_str("PET response exceeded the output limit"),
-            Self::Remote { code, message } => write!(f, "PET rejected request ({code}): {message}"),
+            Self::Remote { code, message, .. } => {
+                write!(f, "PET rejected request ({code}): {message}")
+            }
         }
     }
 }
@@ -810,7 +868,11 @@ fn read_response(reader: &mut BufReader<ChildStdout>, request_id: u64) -> Result
             .and_then(Value::as_str)
             .ok_or_else(|| PetError::Protocol("PET error has no message".into()))?
             .to_owned();
-        return Err(PetError::Remote { code, message });
+        return Err(PetError::Remote {
+            code,
+            kind: PetRemoteKind::from_code(code),
+            message,
+        });
     }
     object
         .get("result")
@@ -906,6 +968,23 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn stable_remote_codes_are_decoded_without_message_inspection() {
+        assert_eq!(
+            PetRemoteKind::from_code(-32008),
+            PetRemoteKind::ReferenceNotFound
+        );
+        assert_eq!(PetRemoteKind::from_code(-32003), PetRemoteKind::Coq);
+        assert_eq!(
+            PetRemoteKind::from_code(-32601),
+            PetRemoteKind::MethodNotFound
+        );
+        assert_eq!(
+            PetRemoteKind::from_code(-32999),
+            PetRemoteKind::Unknown(-32999)
+        );
+    }
+
+    #[test]
     fn malformed_typed_response_discards_the_pet_process() {
         let directory = tempfile::tempdir().unwrap();
         let script = directory.path().join("fake-pet.py");
@@ -930,7 +1009,7 @@ while True:
         result = [
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
-            "refresh_workspace_v1", "structured_assumptions_v1"]
+            "refresh_workspace_v1", "structured_assumptions_v1", "typed_errors_v1"]
     elif method == "petanque/setWorkspace":
         result = None
     elif method == "petanque/document_declarations":
@@ -994,7 +1073,7 @@ while True:
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
             "refresh_workspace_v1", "state_count_v1",
-            "structured_assumptions_v1"]}}
+            "structured_assumptions_v1", "typed_errors_v1"]}}
     elif method == "petanque/refresh_workspace":
         payload = {{"jsonrpc":"2.0", "id":request["id"],
                    "error":{{"code":-32000, "message":"forced refresh failure"}}}}

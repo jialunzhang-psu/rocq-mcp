@@ -46,6 +46,8 @@ their checkpoint text but discard the old PET state handles for lazy replay.
 | `invalid_configuration` | Unavailable path, invalid layout, or unusable project environment. |
 | `ambiguous` | More than one project layout applies. |
 | `project_timeout` | Dune project discovery or description timed out. |
+| `pet_lost` | Retiring a selected proof lost the project PET child or transport. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error while retiring a proof. |
 
 ## `list_files`
 
@@ -70,6 +72,14 @@ module scopes or issue per-sentence AST requests, and it does not index
 unrelated workspace files. Every declaration ID uses normalized `/`
 separators; the request's `file` is not echoed because it is already present in
 each returned ID, and the qualified name is not duplicated as a second string.
+
+| Error kind | When |
+|---|---|
+| `not_found` | The requested file is not selected by Dune. |
+| `invalid_declaration` | PET could not check the selected document as a declaration source. |
+| `pet_lost` | The PET child or its protocol transport was lost. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
+| `invalid_configuration` | The project or PET capability surface is unusable. |
 
 ## `query`
 
@@ -124,8 +134,10 @@ stale PET state.
 | `ambiguous` | PET/Dune produced a duplicate exact declaration identity. |
 | `declaration_changed` | Selected proof no longer matches its declaration. |
 | `pet_lost` | The project PET child or its protocol transport was lost. |
+| `query_failed` | Rocq rejected the query or its expression after request validation. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 | `project_timeout` | Dune project discovery or description timed out. |
-| `invalid_configuration` | Project or query environment is unusable. |
+| `invalid_configuration` | Project or query environment/capability surface is unusable. |
 
 ## `declare`
 
@@ -152,6 +164,7 @@ active, `declare` rejects without changing it; call `abandon` explicitly.
 | `ambiguous` | Declaration placement is not unique. |
 | `declaration_changed` | Target declaration changed while being created. |
 | `invalid_configuration` | Project layout or PET environment is unusable. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 
 ## `prove`
 
@@ -181,6 +194,7 @@ assumption is never reported as completed. If a proof is already active,
 | `axiom_dependency_out_of_scope` | PET reports an axiom outside the selected Dune project, a non-constant kernel assumption, or an unsafe theory flag. |
 | `unfinished_dependency` | PET reports dependence on an admitted or otherwise unfinished project declaration. |
 | `invalid_configuration` | Project, PET state, or proof environment is unusable. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 
 ## `abandon`
 
@@ -197,6 +211,8 @@ and clears the connection's selected proof.
 | `invalid_request` | No project, invalid name, or extra argument. |
 | `not_found` | No active unpublished proof has the name. |
 | `ambiguous` | More than one unpublished proof has the exact identity. |
+| `pet_lost` | Retiring the proof lost the project PET child or transport. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error while retiring the proof. |
 | `invalid_configuration` | The project or in-memory proof state is unavailable. |
 
 ## `check`
@@ -251,6 +267,7 @@ checkpoint states are invalidated and lazily replayed.
 | `pet_lost` | The project PET child or its protocol transport was lost. |
 | `project_timeout` | Dune project discovery or description timed out. |
 | `invalid_configuration` | Project, checkpoint state, or proof environment is unusable. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 
 ## `try`
 
@@ -278,6 +295,7 @@ the explicit indication that the fragment would close the proof.
 | `pet_lost` | The project PET child or its protocol transport was lost. |
 | `project_timeout` | Dune project discovery or description timed out. |
 | `invalid_configuration` | Project or proof environment is unusable. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 
 ## `rewind`
 
@@ -321,4 +339,6 @@ reused.
 | `not_found` | The proof root was retired or the selected proof is unavailable. |
 | `declaration_changed` | The source snapshot no longer matches the open proof. |
 | `pet_lost` | The project PET child or its protocol transport was lost during replay. |
+| `proof_step_failed` | PET rejected a replayed proof fragment while reconstructing the requested checkpoint. |
 | `invalid_configuration` | Project, PET, or checkpoint state is unusable. |
+| `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |

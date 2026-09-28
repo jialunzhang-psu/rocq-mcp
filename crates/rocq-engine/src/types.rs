@@ -29,6 +29,11 @@ pub enum ErrorKind {
     /// The PET child or its protocol transport was lost; this is not a
     /// correctness or execution deadline.
     PetLost,
+    /// PET rejected a semantic query after validating the request shape.
+    QueryFailed,
+    /// PET reported an internal/system failure that is not a project
+    /// configuration error and did not necessarily lose the transport.
+    PetFailure,
     ProjectTimeout,
     BuildTimeout,
     AxiomDependencyOutOfScope,

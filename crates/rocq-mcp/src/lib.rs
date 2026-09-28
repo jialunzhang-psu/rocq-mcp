@@ -161,6 +161,8 @@ mod tests {
             (ErrorKind::DeclarationChanged, "declaration_changed"),
             (ErrorKind::ProofStepFailed, "proof_step_failed"),
             (ErrorKind::PetLost, "pet_lost"),
+            (ErrorKind::QueryFailed, "query_failed"),
+            (ErrorKind::PetFailure, "pet_failure"),
             (ErrorKind::ProjectTimeout, "project_timeout"),
             (ErrorKind::BuildTimeout, "build_timeout"),
             (
@@ -188,7 +190,8 @@ mod tests {
             PetError::Invalid("bad state".into()),
             PetError::Environment("bad workspace".into()),
             PetError::Remote {
-                code: -32000,
+                code: -32601,
+                kind: rocq_engine::pet::PetRemoteKind::MethodNotFound,
                 message: "release rejected".into(),
             },
         ] {
@@ -197,6 +200,15 @@ mod tests {
                 ErrorKind::InvalidConfiguration
             );
         }
+        assert_eq!(
+            pet_release_error(PetError::Remote {
+                code: -32004,
+                kind: rocq_engine::pet::PetRemoteKind::Anomaly,
+                message: "internal failure".into(),
+            })
+            .kind,
+            ErrorKind::PetFailure
+        );
     }
 
     #[test]

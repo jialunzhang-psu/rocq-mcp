@@ -354,6 +354,8 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 fn refresh_error(error: crate::pet::PetError) -> Error {
     let kind = if error.lost() {
         ErrorKind::PetLost
+    } else if error.is_internal_failure() {
+        ErrorKind::PetFailure
     } else {
         ErrorKind::InvalidConfiguration
     };

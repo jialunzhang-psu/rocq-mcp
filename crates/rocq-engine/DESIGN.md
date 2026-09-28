@@ -598,6 +598,13 @@ theory flag. The public `query(kind = "assumptions")` operation may still
 materialize Rocq's human-readable `Print Assumptions` text, but that text is
 display-only and never feeds the trust policy or a follow-up `Locate` command.
 
+The required `typed_errors_v1` capability is equally strict: the pinned PET
+must preserve structural Rocq failures at the protocol boundary, including a
+missing qualified reference (`-32008`), instead of requiring the wrapper to
+classify localized diagnostic text. Rust decodes the numeric code once and
+projects it by operation; an older PET is rejected during the handshake rather
+than silently falling back to an ambiguous error class.
+
 ## 13. MCP operation mapping
 
 The public tool set and current request/response schemas are specified by

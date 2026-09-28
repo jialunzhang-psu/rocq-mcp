@@ -1013,11 +1013,48 @@ fn render_goals(goals: &pet::PetGoals) -> String {
     rendered.join("\n\n")
 }
 
+/// Public-facing operation context for projecting a PET remote error.  PET's
+/// numeric code is operation-independent; this small type is the sole place
+/// where a semantic rejection becomes an MCP error class.
+#[derive(Clone, Copy)]
+enum PetOperation {
+    Declaration,
+    ProofStep,
+    Query,
+}
+
+/// Project one typed PET remote rejection according to the operation that
+/// produced it.
+///
+/// Design note: keeping this table in one place prevents a new PET code from
+/// being accidentally classified as a project configuration failure in one
+/// path and a user proof error in another.
+fn remote_pet_kind(kind: pet::PetRemoteKind, operation: PetOperation) -> ErrorKind {
+    use pet::PetRemoteKind::*;
+    match (operation, kind) {
+        (_, MethodNotFound) => ErrorKind::InvalidConfiguration,
+        (_, Anomaly | System | Unknown(_)) => ErrorKind::PetFailure,
+        (PetOperation::Query, TheoremNotFound | NoNodeAtPoint | ReferenceNotFound) => {
+            ErrorKind::NotFound
+        }
+        (PetOperation::Query, Interrupted | Parsing | Coq) => ErrorKind::QueryFailed,
+        (PetOperation::Declaration, TheoremNotFound | NoNodeAtPoint) => ErrorKind::NotFound,
+        (PetOperation::Declaration, Interrupted | Parsing | Coq | ReferenceNotFound) => {
+            ErrorKind::InvalidDeclaration
+        }
+        (PetOperation::ProofStep, TheoremNotFound | NoNodeAtPoint) => ErrorKind::NotFound,
+        (PetOperation::ProofStep, Interrupted | Parsing | Coq | ReferenceNotFound) => {
+            ErrorKind::ProofStepFailed
+        }
+    }
+}
+
 fn declaration_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
         error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
-        pet::PetError::Invalid(_) | pet::PetError::Remote { .. } => ErrorKind::InvalidDeclaration,
+        pet::PetError::Invalid(_) => ErrorKind::InvalidDeclaration,
+        pet::PetError::Remote { kind, .. } => remote_pet_kind(*kind, PetOperation::Declaration),
         pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
         pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
@@ -1029,7 +1066,7 @@ fn step_pet_error(error: pet::PetError) -> Error {
         error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
         pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
-        pet::PetError::Remote { .. } => ErrorKind::ProofStepFailed,
+        pet::PetError::Remote { kind, .. } => remote_pet_kind(*kind, PetOperation::ProofStep),
         pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
         pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
@@ -1040,11 +1077,10 @@ fn query_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
         error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
-        pet::PetError::Environment(_)
-        | pet::PetError::Remote { .. }
-        | pet::PetError::Protocol(_)
-        | pet::PetError::OutputOverflow
-        | pet::PetError::ProcessLost(_) => ErrorKind::InvalidConfiguration,
+        pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
+        pet::PetError::Remote { kind, .. } => remote_pet_kind(*kind, PetOperation::Query),
+        pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
+        pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
     Error::new(kind, error.to_string())
 }
@@ -1072,6 +1108,42 @@ mod tests {
                 ErrorKind::InvalidDeclaration
             );
         }
+    }
+
+    fn remote(kind: pet::PetRemoteKind) -> pet::PetError {
+        pet::PetError::Remote {
+            code: -32000,
+            kind,
+            message: "typed diagnostic".into(),
+        }
+    }
+
+    #[test]
+    fn pet_remote_errors_keep_operation_semantics() {
+        assert_eq!(
+            query_pet_error(remote(pet::PetRemoteKind::ReferenceNotFound)).kind,
+            ErrorKind::NotFound
+        );
+        assert_eq!(
+            query_pet_error(remote(pet::PetRemoteKind::Coq)).kind,
+            ErrorKind::QueryFailed
+        );
+        assert_eq!(
+            query_pet_error(remote(pet::PetRemoteKind::Anomaly)).kind,
+            ErrorKind::PetFailure
+        );
+        assert_eq!(
+            declaration_pet_error(remote(pet::PetRemoteKind::ReferenceNotFound)).kind,
+            ErrorKind::InvalidDeclaration
+        );
+        assert_eq!(
+            step_pet_error(remote(pet::PetRemoteKind::ReferenceNotFound)).kind,
+            ErrorKind::ProofStepFailed
+        );
+        assert_eq!(
+            declaration_pet_error(remote(pet::PetRemoteKind::MethodNotFound)).kind,
+            ErrorKind::InvalidConfiguration
+        );
     }
 
     fn declaration(name: &str, start: usize, end: usize) -> pet::PetDeclaration {

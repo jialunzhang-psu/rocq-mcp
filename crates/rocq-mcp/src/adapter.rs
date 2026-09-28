@@ -26,6 +26,8 @@ pub(crate) fn public_error(error: &Error) -> Value {
         ErrorKind::DeclarationChanged => "declaration_changed",
         ErrorKind::ProofStepFailed => "proof_step_failed",
         ErrorKind::PetLost => "pet_lost",
+        ErrorKind::QueryFailed => "query_failed",
+        ErrorKind::PetFailure => "pet_failure",
         ErrorKind::ProjectTimeout => "project_timeout",
         ErrorKind::BuildTimeout => "build_timeout",
         ErrorKind::AxiomDependencyOutOfScope => "axiom_dependency_out_of_scope",
@@ -1010,6 +1012,8 @@ pub(crate) fn pet_release_error(error: rocq_engine::pet::PetError) -> Error {
     // dispatcher erase replayable checkpoints while retaining the child.
     let kind = if error.is_transport_loss() {
         ErrorKind::PetLost
+    } else if error.is_internal_failure() {
+        ErrorKind::PetFailure
     } else {
         ErrorKind::InvalidConfiguration
     };

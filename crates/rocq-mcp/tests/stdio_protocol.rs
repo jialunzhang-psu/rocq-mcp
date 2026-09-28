@@ -65,6 +65,113 @@ fn official_stdio_transport_serves_initialize_and_tools_list() {
 }
 
 #[test]
+fn missing_search_reference_is_not_configuration_and_keeps_the_proof_live() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(project.path().join("A.v"), "Theorem t : True. Admitted.\n").unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"typed-error-test","version":"1"}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+
+    let start = call_tool(
+        &mut input,
+        &mut output,
+        2,
+        "start",
+        serde_json::json!({"project_path":project.path()}),
+    );
+    assert_eq!(start["isError"], false, "{start}");
+    let proved = call_tool(
+        &mut input,
+        &mut output,
+        3,
+        "prove",
+        serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
+    );
+    assert_eq!(proved["isError"], false, "{proved}");
+    let checkpoint = proved["structuredContent"]["checkpoint"].clone();
+
+    let missing = call_tool(
+        &mut input,
+        &mut output,
+        4,
+        "query",
+        serde_json::json!({"kind":"search","pattern":"pt_generated"}),
+    );
+    assert_eq!(missing["isError"], true, "{missing}");
+    assert_eq!(
+        missing["structuredContent"]["kind"], "not_found",
+        "{missing}"
+    );
+    assert!(
+        missing["structuredContent"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("pt_generated"))
+    );
+
+    let malformed = call_tool(
+        &mut input,
+        &mut output,
+        5,
+        "query",
+        serde_json::json!({"kind":"type","expression":"("}),
+    );
+    assert_eq!(malformed["isError"], true, "{malformed}");
+    assert_eq!(
+        malformed["structuredContent"]["kind"], "query_failed",
+        "{malformed}"
+    );
+
+    // A semantic query rejection must not invalidate the selected PET state.
+    let goals = call_tool(
+        &mut input,
+        &mut output,
+        6,
+        "query",
+        serde_json::json!({"kind":"goals"}),
+    );
+    assert_eq!(goals["isError"], false, "{goals}");
+    assert_eq!(goals["structuredContent"]["checkpoint"], checkpoint);
+    let abandoned = call_tool(
+        &mut input,
+        &mut output,
+        7,
+        "abandon",
+        serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
+    );
+    assert_eq!(abandoned["isError"], false, "{abandoned}");
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     let project = tempfile::tempdir().unwrap();
     fs::write(
