@@ -51,6 +51,7 @@ pub fn tool_definitions() -> &'static [Tool] {
                 "at": declaration_id,
                 "expression": s,
                 "pattern": s,
+                "offset": {"type":"integer","minimum":0},
             }),
             &["kind"],
         );
@@ -74,8 +75,8 @@ pub fn tool_definitions() -> &'static [Tool] {
             (
                 "declare",
                 schema(
-                    json!({"name":s,"statement":s,"kind":s,"library":s,"file":s}),
-                    &["name", "statement", "library", "file"],
+                    json!({"name":s,"statement":s,"kind":s,"file":s}),
+                    &["name", "statement", "file"],
                 ),
             ),
             (

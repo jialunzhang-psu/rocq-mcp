@@ -94,9 +94,10 @@ mod tests {
                 "notations"
             ])
         );
-        for field in ["target", "expression", "pattern"] {
+        for field in ["target", "expression", "pattern", "offset"] {
             assert!(value["inputSchema"]["properties"].get(field).is_some());
         }
+        assert_eq!(value["inputSchema"]["properties"]["offset"]["minimum"], 0);
         assert!(
             value["description"]
                 .as_str()
@@ -211,6 +212,24 @@ mod tests {
         assert_eq!(schema["properties"]["steps"]["minimum"], 1);
         assert_eq!(schema["properties"]["checkpoint"]["minimum"], 1);
         assert!(schema["properties"].get("to").is_none());
+    }
+
+    #[test]
+    fn declare_schema_has_one_dune_owned_file_identity() {
+        let declare = tool_definitions()
+            .iter()
+            .find(|tool| tool.name == "declare")
+            .expect("declare tool exists");
+        let schema = serde_json::to_value(declare).unwrap()["inputSchema"].clone();
+        assert_eq!(schema["required"], json!(["name", "statement", "file"]));
+        assert!(schema["properties"].get("library").is_none());
+        assert!(
+            declare
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("callers do not repeat it")
+        );
     }
 
     #[test]

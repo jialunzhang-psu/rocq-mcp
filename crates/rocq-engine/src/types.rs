@@ -199,7 +199,6 @@ pub(crate) struct SourceAnchor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclarationTarget {
     pub(crate) info: DeclarationInfo,
-    pub(crate) library: LogicalLibrary,
     pub(crate) anchor: SourceAnchor,
     pub(crate) new_header: Option<String>,
 }

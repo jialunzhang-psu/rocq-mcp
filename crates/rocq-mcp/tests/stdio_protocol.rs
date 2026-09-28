@@ -607,7 +607,7 @@ fn abandon_discards_an_open_declaration_and_allows_redeclaration() {
         (
             3,
             "declare",
-            serde_json::json!({"name":"Demo.Main.fresh","statement":"True","library":"Demo.Main","file":"Main.v"}),
+            serde_json::json!({"name":"Demo.Main.fresh","statement":"True","file":"Main.v"}),
         ),
         (
             4,
@@ -617,7 +617,7 @@ fn abandon_discards_an_open_declaration_and_allows_redeclaration() {
         (
             5,
             "declare",
-            serde_json::json!({"name":"Demo.Main.fresh","statement":"True","library":"Demo.Main","file":"Main.v"}),
+            serde_json::json!({"name":"Demo.Main.fresh","statement":"True","file":"Main.v"}),
         ),
     ] {
         writeln!(input, "{}", serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).unwrap();

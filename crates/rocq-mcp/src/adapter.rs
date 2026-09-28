@@ -7,10 +7,14 @@ use crate::{
 };
 use rocq_engine::{
     DeclarationIdentity, DeclarationInfo, DeclarationKind, Engine, Error, ErrorKind, FileId,
-    LogicalLibrary, OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, validate_fragments,
+    OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, validate_fragments,
 };
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
+
+/// Maximum raw UTF-8 bytes returned by one semantic text query response.
+/// PET still owns the complete result; this limit bounds only MCP transport.
+const QUERY_PAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) fn public_error(error: &Error) -> Value {
     let kind = match error.kind {
@@ -289,15 +293,9 @@ fn dispatch_attached(
             }
         }
         "declare" => {
-            reject_unknown(args, &["name", "statement", "kind", "library", "file"])?;
-            let library_text = required_string(args, "library")?;
-            let library = logical_library(&library_text)?;
+            reject_unknown(args, &["name", "statement", "kind", "file"])?;
             let name = required_string(args, "name")?;
-            let identity = declared_identity(
-                FileId(required_string(args, "file")?.replace('\\', "/")),
-                &library,
-                &name,
-            )?;
+            let file = FileId(required_string(args, "file")?.replace('\\', "/"));
             let kind = declaration_kind(args.get("kind").and_then(Value::as_str))?;
             let statement = required_string(args, "statement")?;
             retire_proof(project, selection)?;
@@ -305,8 +303,8 @@ fn dispatch_attached(
                 project.project(),
                 project.actor(),
                 kind,
-                identity,
-                &library,
+                file,
+                &name,
                 &statement,
             )?;
             begin_proof(project, selection, opened)
@@ -623,7 +621,8 @@ fn query(
             Ok(state_json(&view, Some(checkpoint)))
         }
         "statement" | "proof" | "definition" | "assumptions" | "dependencies" => {
-            reject_unknown(args, &["kind", "target"])?;
+            reject_unknown(args, &["kind", "target", "offset"])?;
+            let offset = query_offset(args)?;
             let identity = declaration_id(
                 args.get("target")
                     .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "target is required"))?,
@@ -643,32 +642,30 @@ fn query(
             if selection.checkpoints.proof.is_some() {
                 let (_, state) = ensure_current_state(engine, project, selection)?;
                 let proof = selection.checkpoints.proof.as_ref().unwrap();
-                return Ok(json!({
-                    "text": engine.query_state(
+                return text_result(
+                    engine.query_state(
                         project.project(),
                         project.actor(),
                         &proof.target,
                         state,
                         query,
                     )?,
-                }));
+                    offset,
+                );
             }
-            Ok(json!({
-                "text": engine.query_at(
-                    project.project(),
-                    project.actor(),
-                    &identity,
-                    query,
-                )?,
-            }))
+            text_result(
+                engine.query_at(project.project(), project.actor(), &identity, query)?,
+                offset,
+            )
         }
         "search" | "type" | "notations" => {
             let allowed = if kind == "search" {
-                &["kind", "pattern", "at"][..]
+                &["kind", "pattern", "at", "offset"][..]
             } else {
-                &["kind", "expression", "at"][..]
+                &["kind", "expression", "at", "offset"][..]
             };
             reject_unknown(args, allowed)?;
+            let offset = query_offset(args)?;
             let query = match kind {
                 "search" => PetQuery::Search(required_string(args, "pattern")?),
                 "type" => PetQuery::ExpressionType(required_string(args, "expression")?),
@@ -678,15 +675,16 @@ fn query(
             if selection.checkpoints.proof.is_some() {
                 let (_, state) = ensure_current_state(engine, project, selection)?;
                 let proof = selection.checkpoints.proof.as_ref().unwrap();
-                return Ok(json!({
-                    "text": engine.query_state(
+                return text_result(
+                    engine.query_state(
                         project.project(),
                         project.actor(),
                         &proof.target,
                         state,
                         query,
                     )?,
-                }));
+                    offset,
+                );
             }
             let identity = declaration_id(args.get("at").ok_or_else(|| {
                 Error::new(
@@ -694,20 +692,66 @@ fn query(
                     "at is required when no proof is selected",
                 )
             })?)?;
-            Ok(json!({
-                "text": engine.query_at(
-                    project.project(),
-                    project.actor(),
-                    &identity,
-                    query,
-                )?,
-            }))
+            text_result(
+                engine.query_at(project.project(), project.actor(), &identity, query)?,
+                offset,
+            )
         }
         _ => Err(Error::new(
             ErrorKind::InvalidRequest,
             "unsupported query kind",
         )),
     }
+}
+
+/// Parse the optional stateless text continuation offset. The value counts
+/// UTF-8 bytes and is validated against the materialized PET result by
+/// `text_result`; this function has no side effects.
+fn query_offset(args: &Value) -> Result<usize, Error> {
+    let Some(value) = args.get("offset") else {
+        return Ok(0);
+    };
+    let offset = value.as_u64().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidRequest,
+            "offset must be a non-negative integer",
+        )
+    })?;
+    usize::try_from(offset)
+        .map_err(|_| Error::new(ErrorKind::InvalidRequest, "offset is too large"))
+}
+
+/// Project a complete PET text result into one bounded MCP page.
+///
+/// `offset` is a UTF-8 byte boundary previously returned as `next_offset`.
+/// Small first pages preserve the original `{text}` shape. Paged responses
+/// additionally report the exact offset and total byte length, plus
+/// `next_offset` when another page exists. Invalid or stale offsets fail
+/// without retaining any wrapper-side query state.
+fn text_result(text: String, offset: usize) -> Result<Value, Error> {
+    let length = text.len();
+    if offset > length || !text.is_char_boundary(offset) || (offset == length && !text.is_empty()) {
+        return Err(Error::new(
+            ErrorKind::InvalidRequest,
+            "offset is not a valid boundary in the query result",
+        ));
+    }
+    if offset == 0 && length <= QUERY_PAGE_BYTES {
+        return Ok(json!({"text": text}));
+    }
+    let mut end = offset.saturating_add(QUERY_PAGE_BYTES).min(length);
+    while end > offset && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut result = json!({
+        "text": &text[offset..end],
+        "offset": offset,
+        "total_bytes": length,
+    });
+    if end < length {
+        result["next_offset"] = json!(end);
+    }
+    Ok(result)
 }
 
 fn ensure_current_state(
@@ -883,54 +927,6 @@ fn retire_proof(project: &ProjectRuntime, selection: &mut Selection) -> Result<(
     Ok(())
 }
 
-fn logical_library(value: &str) -> Result<LogicalLibrary, Error> {
-    let parts = value.split('.').map(str::to_owned).collect::<Vec<_>>();
-    if parts.iter().any(String::is_empty) {
-        return Err(Error::new(
-            ErrorKind::InvalidDeclaration,
-            "library contains an empty component",
-        ));
-    }
-    Ok(LogicalLibrary(parts))
-}
-
-fn declared_identity(
-    file: FileId,
-    library: &LogicalLibrary,
-    name: &str,
-) -> Result<DeclarationIdentity, Error> {
-    let parts = name.split('.').map(str::to_owned).collect::<Vec<_>>();
-    if parts.is_empty() || parts.iter().any(String::is_empty) {
-        return Err(Error::new(
-            ErrorKind::InvalidDeclaration,
-            "name contains an empty component",
-        ));
-    }
-    let relative = if parts.starts_with(&library.0) {
-        let relative = &parts[library.0.len()..];
-        if relative.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidDeclaration,
-                "name does not contain a declaration",
-            ));
-        }
-        relative
-    } else {
-        // A multi-component name that omits the library is still a valid
-        // module-qualified local name; Dune supplies the library prefix once.
-        &parts[..]
-    };
-    Ok(DeclarationIdentity {
-        file,
-        qualified_path: library
-            .0
-            .iter()
-            .cloned()
-            .chain(relative.iter().cloned())
-            .collect(),
-    })
-}
-
 fn declaration_kind(value: Option<&str>) -> Result<DeclarationKind, Error> {
     match value.unwrap_or("Theorem").to_ascii_lowercase().as_str() {
         "theorem" => Ok(DeclarationKind::Theorem),
@@ -975,4 +971,46 @@ pub(crate) fn pet_release_error(error: rocq_engine::pet::PetError) -> Error {
         ErrorKind::InvalidConfiguration
     };
     Error::new(kind, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_query_pages_are_bounded_and_resume_on_utf8_boundaries() {
+        let text = format!("{}🦀tail", "a".repeat(QUERY_PAGE_BYTES - 1));
+        let first = text_result(text.clone(), 0).unwrap();
+        assert_eq!(first["text"].as_str().unwrap().len(), QUERY_PAGE_BYTES - 1);
+        assert_eq!(first["offset"], 0);
+        assert_eq!(first["next_offset"], QUERY_PAGE_BYTES - 1);
+        assert_eq!(first["total_bytes"], text.len());
+
+        let offset = first["next_offset"].as_u64().unwrap() as usize;
+        let second = text_result(text.clone(), offset).unwrap();
+        assert_eq!(second["text"], "🦀tail");
+        assert_eq!(second["offset"], offset);
+        assert!(second.get("next_offset").is_none());
+
+        let middle_of_crab = offset + 1;
+        assert_eq!(
+            text_result(text, middle_of_crab).unwrap_err().kind,
+            ErrorKind::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn small_text_query_preserves_the_original_wire_shape() {
+        assert_eq!(text_result("ok".into(), 0).unwrap(), json!({"text":"ok"}));
+        assert_eq!(
+            text_result("ok".into(), 3).unwrap_err().kind,
+            ErrorKind::InvalidRequest
+        );
+        for value in [json!(-1), json!(1.5), json!("1")] {
+            assert_eq!(
+                query_offset(&json!({"offset":value})).unwrap_err().kind,
+                ErrorKind::InvalidRequest
+            );
+        }
+    }
 }

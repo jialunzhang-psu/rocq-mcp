@@ -182,16 +182,23 @@ impl Engine {
     }
 
     /// Validate a new declaration header at PET's exact module insertion state.
-    /// Disk is untouched until publication.
+    ///
+    /// `file` is a Dune-selected source identity. `name` may be local,
+    /// module-qualified, or fully compilation-unit-qualified; the logical
+    /// library is derived exclusively from Dune. Disk is untouched until
+    /// publication.
     pub fn declare(
         &self,
         project: &DuneProject,
         actor: &pet::PetActor,
         kind: DeclarationKind,
-        identity: DeclarationIdentity,
-        library: &LogicalLibrary,
+        file: FileId,
+        name: &str,
         statement: &str,
     ) -> Result<OpenedProof> {
+        let source = project.source(&file)?;
+        let library = project.library(&source)?;
+        let identity = declared_identity(file, &library, name)?;
         validate_identity(&identity)?;
         let statement = statement.trim().trim_end_matches('.').trim();
         if statement.is_empty() {
@@ -200,15 +207,7 @@ impl Engine {
                 "declaration statement is empty",
             ));
         }
-        let source = project.source(&identity.file)?;
-        let actual_library = project.library(&source)?;
-        if &actual_library != library {
-            return Err(Error::new(
-                ErrorKind::InvalidDeclaration,
-                "file does not belong to the requested Dune logical library",
-            ));
-        }
-        let relative = relative_path(&identity, library)?;
+        let relative = relative_path(&identity, &library)?;
         let (leaf, modules) = relative.split_last().ok_or_else(|| {
             Error::new(ErrorKind::InvalidDeclaration, "declaration path is empty")
         })?;
@@ -259,7 +258,6 @@ impl Engine {
         };
         let target = DeclarationTarget {
             info: info.clone(),
-            library: library.clone(),
             anchor: SourceAnchor {
                 source,
                 digest: Sha256::digest(&bytes).into(),
@@ -676,7 +674,6 @@ impl Engine {
                         kind,
                         statement: row.statement,
                     },
-                    library: library.clone(),
                     anchor: SourceAnchor {
                         source: source.clone(),
                         digest,
@@ -853,6 +850,46 @@ fn relative_path<'a>(
         ));
     }
     Ok(&identity.qualified_path[library.0.len()..])
+}
+
+/// Form one declaration identity from Dune's compilation unit and a caller
+/// name. A matching full prefix is accepted for convenience, but Dune remains
+/// the sole owner of that prefix and it is never accepted as separate input.
+fn declared_identity(
+    file: FileId,
+    library: &LogicalLibrary,
+    name: &str,
+) -> Result<DeclarationIdentity> {
+    let parts = name.split('.').map(str::to_owned).collect::<Vec<_>>();
+    if parts.iter().any(String::is_empty) {
+        return Err(Error::new(
+            ErrorKind::InvalidDeclaration,
+            "name contains an empty component",
+        ));
+    }
+    let relative = if parts.starts_with(&library.0) {
+        let relative = &parts[library.0.len()..];
+        if relative.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidDeclaration,
+                "name does not contain a declaration",
+            ));
+        }
+        relative
+    } else {
+        // Design note: a dotted name without the Dune prefix is a local
+        // nested-module path, not an alternative logical-library authority.
+        &parts
+    };
+    Ok(DeclarationIdentity {
+        file,
+        qualified_path: library
+            .0
+            .iter()
+            .cloned()
+            .chain(relative.iter().cloned())
+            .collect(),
+    })
 }
 
 fn declaration_kind(value: &str) -> Option<DeclarationKind> {
@@ -1036,6 +1073,32 @@ fn query_pet_error(error: pet::PetError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_identity_uses_exactly_one_dune_library_prefix() {
+        let library = LogicalLibrary(vec!["Demo".into(), "Main".into()]);
+        let file = FileId("Main.v".into());
+        for (name, expected) in [
+            ("fresh", vec!["Demo", "Main", "fresh"]),
+            ("Nested.fresh", vec!["Demo", "Main", "Nested", "fresh"]),
+            ("Demo.Main.fresh", vec!["Demo", "Main", "fresh"]),
+        ] {
+            let identity = declared_identity(file.clone(), &library, name).unwrap();
+            assert_eq!(identity.qualified_path, expected);
+        }
+        assert_eq!(
+            declared_identity(file.clone(), &library, "Demo.Main")
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidDeclaration
+        );
+        assert_eq!(
+            declared_identity(file, &library, "Nested..fresh")
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidDeclaration
+        );
+    }
 
     fn declaration(name: &str, start: usize, end: usize) -> pet::PetDeclaration {
         pet::PetDeclaration {

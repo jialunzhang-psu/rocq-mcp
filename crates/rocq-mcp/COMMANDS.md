@@ -72,6 +72,8 @@ The query variant is `args.kind`; there is no `request` wrapper.
 require `expression`. `search` requires a Rocq Search pattern. `search`,
 `type`, and `notations` accept an optional `at` `DeclarationId` selecting the
 original PET source state when no proof is selected.
+Every text-returning variant accepts an optional non-negative `offset` for
+resuming a bounded result; `goals` does not.
 Do not mix fields from different variants.
 
 ```json
@@ -84,13 +86,20 @@ Do not mix fields from different variants.
 {"tool":"query","args":{"kind":"dependencies","target":{"file":"Main.v","qualified_path":["Demo","t"]}}}
 {"tool":"query","args":{"kind":"type","expression":"Nat.add 1 2","at":{"file":"Main.v","qualified_path":["Demo","t"]}}}
 {"tool":"query","args":{"kind":"notations","expression":"x + y","at":{"file":"Main.v","qualified_path":["Demo","t"]}}}
+{"tool":"query","args":{"kind":"proof","target":{"file":"Main.v","qualified_path":["Demo","t"]},"offset":32768}}
 ```
 
 `search` executes Rocq `Search` through PET; it is not a substring or status
 filter over wrapper metadata. `statement` executes `About`, while `proof` and
 `definition` execute `Print`; `proof` returns Rocq's proof term, not the
 original tactic script. `goals` returns a proof state. Other variants return
-`{"text":"<Rocq output>"}`. With a
+`{"text":"<Rocq output>"}` when the complete result fits in 32 KiB. Larger
+results are split at UTF-8 boundaries and return
+`{"text":"...","offset":0,"total_bytes":N,"next_offset":K}`. Pass the
+returned `next_offset` unchanged as the next request's `offset`; the last page
+omits `next_offset`. Offsets count raw UTF-8 bytes, and callers must not invent
+or adjust them. Paging is stateless: PET recomputes the same semantic query,
+while the wrapper only slices its materialized text and stores no cursor. With a
 selected open proof, `type` and `notations` run in that proof's current
 replayed context. Without one, `search`, `type`, and `notations` require `at`
 and run after that declaration in its original source file. The wrapper never
@@ -103,7 +112,7 @@ stale PET state.
 
 | Error kind | When |
 |---|---|
-| `invalid_request` | Missing project, unknown kind, invalid field, target, or expression. |
+| `invalid_request` | Missing project, unknown kind, invalid field, target, expression, or paging offset. |
 | `not_found` | Target declaration does not exist. |
 | `ambiguous` | PET/Dune produced a duplicate exact declaration identity. |
 | `declaration_changed` | Selected proof no longer matches its declaration. |
@@ -114,16 +123,18 @@ stale PET state.
 ## `declare`
 
 ```json
-{"tool":"declare","args":{"name":"Demo.Main.new_t","statement":"True","kind":"Theorem","library":"Demo.Main","file":"Main.v"}}
+{"tool":"declare","args":{"name":"Demo.Main.new_t","statement":"True","kind":"Theorem","file":"Main.v"}}
 ```
 
 `kind` defaults to `Theorem` and accepts `Theorem`, `Lemma`, or `Definition`.
-`library` is required and is a Dune-selected logical compilation unit, not a
-file path. `file` is the workspace-relative Dune-selected source file where
-the declaration is inserted. The result is the new open proof state. `name` is
-either the local constant or its full library/module-qualified name. The target
-source file must already be selected by Dune; the wrapper does not create files
-or edit `(modules ...)`. Source insertion occurs only when the proof closes.
+`file` is the workspace-relative Dune-selected source file where the
+declaration is inserted. Dune is the sole owner of that file's logical
+compilation-unit prefix; callers do not repeat it in a separate `library`
+field. The result is the new open proof state. `name` is either the local
+constant, a nested-module-qualified local name, or its full
+compilation-unit/module-qualified name. The target source file must already be
+selected by Dune; the wrapper does not create files or edit `(modules ...)`.
+Source insertion occurs only when the proof closes.
 
 | Error kind | When |
 |---|---|
@@ -131,7 +142,7 @@ or edit `(modules ...)`. Source insertion occurs only when the proof closes.
 | `invalid_declaration` | Invalid name, kind, statement, or lexical context. |
 | `ambiguous` | Declaration placement is not unique. |
 | `declaration_changed` | Target declaration changed while being created. |
-| `invalid_configuration` | Project layout, logical library, or PET environment is unusable. |
+| `invalid_configuration` | Project layout or PET environment is unusable. |
 
 ## `prove`
 

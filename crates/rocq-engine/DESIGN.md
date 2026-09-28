@@ -584,7 +584,8 @@ is a PET capability gap, not permission to restore a local scanner.
 
 ## 13. MCP operation mapping
 
-The public tool set and request/response schemas remain unchanged.
+The public tool set and current request/response schemas are specified by
+`crates/rocq-mcp/COMMANDS.md`.
 
 ### `start`
 
@@ -614,8 +615,10 @@ not create an engine attempt or trace cursor.
 ### `declare`
 
 Ask PET to validate the new declaration header and produce its root proof
-state and insertion anchor. Retain the exact header in the active
-`ProofSession`; do not touch the source until publication succeeds.
+state and insertion anchor. Derive the compilation-unit prefix from the
+Dune-selected `file`; never ask the caller to repeat Dune's logical library.
+Retain the exact header in the active `ProofSession`; do not touch the source
+until publication succeeds.
 
 ### `check`
 
@@ -653,6 +656,11 @@ Run all semantic variants through PET. With an active proof, use the current
 PET state. Named queries without an active proof obtain a temporary state in
 the target document and release it after returning the materialized result.
 `search` is Rocq `Search`, not a wrapper metadata search.
+
+The MCP boundary, not the engine, bounds materialized text to 32 KiB UTF-8
+pages. Continuation is one integer byte offset returned by the preceding page;
+the server retains no query cursor and never interprets or reimplements PET's
+text. Unpaged small results preserve the original `{text}` response.
 
 ### `abandon`
 
