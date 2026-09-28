@@ -1,0 +1,4 @@
+interface:
+  display_name: "自然语言证明 → Rocq"
+  short_description: "主代理写数学证明，Luna max 按纸面顺序逐条翻译并验收"
+  default_prompt: "使用 $rocq-natural-proof：先在单独文本文件中用自然语言和数学记号写清目标定理及证明，正文不含 Rocq 代码、形式化名称映射或工作日志；再由一个 Luna max 严格按纸面顺序每次翻译一条到对应 Rocq 文件。完成或遇到缺口即停下回报，由主代理验收或修订后再派发下一条。主代理工作前先暂停译者。"

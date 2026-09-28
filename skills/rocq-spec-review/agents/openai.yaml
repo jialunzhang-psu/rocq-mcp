@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rocq Spec Review"
+  short_description: "Review target-relevant Rocq contracts without proof scripts"
+  default_prompt: "Use $rocq-spec-review to review the relevant theorem contracts, starting with the target's Print Assumptions for large-project proof-status questions and extracting specifications only as needed."
