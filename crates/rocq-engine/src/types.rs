@@ -253,5 +253,4 @@ pub enum PetQuery {
     Dependencies(String),
     ExpressionType(String),
     Notation(String),
-    Locate(String),
 }

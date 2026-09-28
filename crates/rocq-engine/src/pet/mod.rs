@@ -25,6 +25,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "atomic_run_v1",
     "release_states_v1",
     "refresh_workspace_v1",
+    "structured_assumptions_v1",
 ];
 
 fn configured_pet_binary() -> PathBuf {
@@ -147,6 +148,46 @@ pub(crate) struct PetDeclaration {
     pub(crate) statement: String,
 }
 
+/// Semantic class assigned by Rocq's global-context dependency analysis.
+/// Only `Axiom` can correspond to an ordinary project declaration; all other
+/// values represent trust conditions that the engine rejects explicitly.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PetAssumptionKind {
+    Axiom,
+    Positive,
+    Guarded,
+    TypeInType,
+    Uip,
+    SectionVariable,
+    Opaque,
+    Transparent,
+}
+
+/// One structured dependency identity returned directly by PET. The path is
+/// absolute in Rocq's name table and never reconstructed from printed output.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct PetAssumption {
+    pub(crate) kind: PetAssumptionKind,
+    pub(crate) qualified_path: Vec<String>,
+}
+
+/// Environment-wide trust switches that are not attached to one declaration.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct PetTheoryAssumptions {
+    pub(crate) rewrite_rules: bool,
+    pub(crate) impredicative_set: bool,
+    pub(crate) type_in_type: bool,
+}
+
+/// Complete structured trust report for one declaration at one immutable PET
+/// state. Empty assumptions and false theory flags mean globally closed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct PetAssumptionReport {
+    pub(crate) assumptions: Vec<PetAssumption>,
+    pub(crate) theory: PetTheoryAssumptions,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct PetRange {
     pub(crate) start: usize,
@@ -263,6 +304,45 @@ impl PetActor {
         result
     }
 
+    /// Return Rocq's structured global-context dependencies for one absolute
+    /// declaration path. Invalid response shape or empty name components are
+    /// protocol loss and discard the PET process; this call has no side
+    /// effects and allocates no exported state.
+    pub(crate) fn assumptions(
+        &self,
+        state: PetStateId,
+        qualified_path: &[String],
+    ) -> Result<PetAssumptionReport, PetError> {
+        let value = self.call_live(
+            "petanque/assumptions",
+            json!({"st": state.get(), "qualified_path": qualified_path}),
+        )?;
+        let result = serde_json::from_value::<PetAssumptionReport>(value)
+            .map_err(|error| {
+                PetError::Protocol(format!("invalid PET assumption response: {error}"))
+            })
+            .and_then(|report| {
+                let invalid_path = report.assumptions.iter().any(|assumption| {
+                    assumption.qualified_path.is_empty()
+                        || assumption
+                            .qualified_path
+                            .iter()
+                            .any(|component| component.is_empty())
+                });
+                if invalid_path {
+                    Err(PetError::Protocol(
+                        "PET assumption response contains an invalid path".into(),
+                    ))
+                } else {
+                    Ok(report)
+                }
+            });
+        if let Err(error) = &result {
+            self.poison_if_lost(error);
+        }
+        result
+    }
+
     /// Run one Rocq query in an exact immutable context. The temporary state
     /// exported by PET's `run` response is released before returning.
     pub(crate) fn query(
@@ -289,7 +369,6 @@ impl PetActor {
             crate::PetQuery::Assumptions(name) => format!("Print Assumptions {name}."),
             crate::PetQuery::Dependencies(name) => format!("Print All Dependencies {name}."),
             crate::PetQuery::ExpressionType(expression) => format!("Check ({expression})."),
-            crate::PetQuery::Locate(name) => format!("Locate {name}."),
             crate::PetQuery::Notation(_) => unreachable!(),
         };
         let value = self.call_live("petanque/run", json!({"st": state.get(), "tac": command}))?;
@@ -851,7 +930,7 @@ while True:
         result = [
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
-            "refresh_workspace_v1"]
+            "refresh_workspace_v1", "structured_assumptions_v1"]
     elif method == "petanque/setWorkspace":
         result = None
     elif method == "petanque/document_declarations":
@@ -914,7 +993,8 @@ while True:
         payload = {{"jsonrpc":"2.0", "id":request["id"], "result":[
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
-            "refresh_workspace_v1", "state_count_v1"]}}
+            "refresh_workspace_v1", "state_count_v1",
+            "structured_assumptions_v1"]}}
     elif method == "petanque/refresh_workspace":
         payload = {{"jsonrpc":"2.0", "id":request["id"],
                    "error":{{"code":-32000, "message":"forced refresh failure"}}}}

@@ -516,6 +516,8 @@ It owns no proof topology. Its responsibilities include:
 - executing a complete fragment atomically from a supplied state;
 - goals plus direct Rocq `Search`, `About`, `Print`, type, notation,
   dependency, and assumption queries;
+- a structured global-context report containing typed assumption identities
+  and unsafe-theory flags for publication trust decisions;
 - exact state release;
 - transport failure detection and process restart coordination.
 
@@ -586,6 +588,15 @@ Trust inspection is also PET-backed. The wrapper may compare structured PET
 results against configured policy, but it must not scan source text for
 `Axiom`, `Admitted`, module scopes, or declaration names. Missing PET metadata
 is a PET capability gap, not permission to restore a local scanner.
+
+The required `structured_assumptions_v1` capability returns absolute name
+components directly from Rocq's name table together with the semantic kind of
+each assumption and environment-wide theory flags. The wrapper permits only
+constant axioms that PET can classify as explicit `Axiom` declarations inside
+the selected Dune project; it rejects every other assumption kind and unsafe
+theory flag. The public `query(kind = "assumptions")` operation may still
+materialize Rocq's human-readable `Print Assumptions` text, but that text is
+display-only and never feeds the trust policy or a follow-up `Locate` command.
 
 ## 13. MCP operation mapping
 

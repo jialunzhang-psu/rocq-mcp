@@ -662,6 +662,64 @@ mod tests {
     }
 
     #[test]
+    fn completed_proofs_report_canonical_structured_dependencies() {
+        let cases = [
+            ("A.v", "short_dependency", "True"),
+            (
+                "B.v",
+                "dependency_with_a_name_long_enough_to_wrap_human_readable_locate_output",
+                "True",
+            ),
+            (
+                "C.v",
+                "dependency_with_multiline_type",
+                "forall (P : Prop) (K : Type) (x y z : nat),\n  P -> P",
+            ),
+        ];
+        let sources = cases
+            .iter()
+            .map(|(file, dependency, statement)| {
+                let source = format!(
+                    "Theorem {dependency} : {statement}.\n\
+                     Admitted.\n\
+                     Theorem target : {statement}.\n\
+                     Proof. exact {dependency}. Qed.\n"
+                );
+                // Design note: the cases deliberately vary presentation width
+                // while retaining each exact absolute identity for assertions.
+                let unit = file.strip_suffix(".v").unwrap().to_owned();
+                ((*file, unit, *dependency), source)
+            })
+            .collect::<Vec<_>>();
+        let files = sources
+            .iter()
+            .map(|((file, _, _), source)| (*file, source.as_str()))
+            .collect::<Vec<_>>();
+        let project = dune_project("Demo", &files);
+        let runtime = runtime();
+        for ((file, unit, dependency), _) in &sources {
+            let server = attach(&runtime, &project);
+            let error = dispatch(
+                &runtime,
+                &server.session,
+                "prove",
+                json!({
+                    "target": {
+                        "file": file,
+                        "qualified_path": ["Demo", unit, "target"]
+                    }
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::UnfinishedDependency);
+            assert_eq!(
+                error.message,
+                format!("proof depends on unfinished declaration 'Demo.{unit}.{dependency}'")
+            );
+        }
+    }
+
+    #[test]
     fn failed_dune_refresh_retains_replayable_checkpoints() {
         let project = dune_project("Demo", &[("A.v", "Theorem t : True. Admitted.\n")]);
         let runtime = runtime();

@@ -13,8 +13,9 @@ PET-backed proof operations. A proof state has the exact reusable `target`
 `checkpoint`. Status is `Open` or `Completed`; proof states do not duplicate
 the target as a string or repeat its source statement.
 `Completed` is returned only after PET reports a proved terminal AST, Dune/Rocq
-successfully builds the source, and PET's `Print Assumptions` output passes the
-wrapper's trust policy. The wrapper never infers completion from source text.
+successfully builds the source, and PET's structured global-context report
+passes the wrapper's trust policy. The wrapper never infers completion from
+source text or parses human-readable Rocq output to classify dependencies.
 
 Errors are JSON objects of the form
 `{"kind":"invalid_request","message":"call start first"}`. The `message` gives
@@ -161,11 +162,11 @@ active, `declare` rejects without changing it; call `abandon` explicitly.
 Returns the selected proof state.
 The declaration ID must be returned unchanged by `list_decls`. When `prove`
 loads an existing declaration it asks PET whether the terminal AST
-is proved. If so, it builds the exact Dune target and queries PET for
-assumptions before returning `Completed`; otherwise PET opens the proof and
-supplies its goals. A failed build or unauthorized assumption is never reported
-as completed. If a proof is already active, `prove` rejects without changing
-it; call `abandon` explicitly.
+is proved. If so, it builds the exact Dune target and requests PET's typed
+assumption identities and theory flags before returning `Completed`; otherwise
+PET opens the proof and supplies its goals. A failed build or unauthorized
+assumption is never reported as completed. If a proof is already active,
+`prove` rejects without changing it; call `abandon` explicitly.
 
 | Error kind | When |
 |---|---|
@@ -177,7 +178,7 @@ it; call `abandon` explicitly.
 | `pet_lost` | The project PET child or its protocol transport was lost during open or replay. |
 | `project_timeout` | Dune project discovery or description timed out. |
 | `build_timeout` | An explicitly configured Dune-command deadline expired while validating a PET-finished declaration. |
-| `axiom_dependency_out_of_scope` | PET reports an axiom outside the selected Dune project. |
+| `axiom_dependency_out_of_scope` | PET reports an axiom outside the selected Dune project, a non-constant kernel assumption, or an unsafe theory flag. |
 | `unfinished_dependency` | PET reports dependence on an admitted or otherwise unfinished project declaration. |
 | `invalid_configuration` | Project, PET state, or proof environment is unusable. |
 

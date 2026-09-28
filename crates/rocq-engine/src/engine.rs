@@ -738,22 +738,45 @@ impl Engine {
         state: pet::PetStateId,
     ) -> Result<()> {
         let report = actor
-            .query(
-                state,
-                &PetQuery::Assumptions(target.info.identity.qualified_name()),
-            )
+            .assumptions(state, &target.info.identity.qualified_path)
             .map_err(query_pet_error)?;
-        let assumptions = parse_assumptions(&report)?;
-        for printed in assumptions {
-            let located = actor
-                .query(state, &PetQuery::Locate(printed.clone()))
-                .map_err(query_pet_error)?;
-            let canonical = locate_constant(&located).ok_or_else(|| {
-                Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "PET Locate returned no unique constant",
-                )
-            })?;
+        let mut unsafe_theory = Vec::new();
+        if report.theory.rewrite_rules {
+            unsafe_theory.push("rewrite rules");
+        }
+        if report.theory.impredicative_set {
+            unsafe_theory.push("impredicative Set");
+        }
+        if report.theory.type_in_type {
+            unsafe_theory.push("type-in-type");
+        }
+        if !unsafe_theory.is_empty() {
+            return Err(Error::new(
+                ErrorKind::AxiomDependencyOutOfScope,
+                format!(
+                    "proof relies on unsafe Rocq theory features: {}",
+                    unsafe_theory.join(", ")
+                ),
+            ));
+        }
+        for assumption in report.assumptions {
+            let canonical = assumption.qualified_path.join(".");
+            if assumption.kind != pet::PetAssumptionKind::Axiom {
+                let kind = match assumption.kind {
+                    pet::PetAssumptionKind::Axiom => unreachable!(),
+                    pet::PetAssumptionKind::Positive => "unchecked positivity",
+                    pet::PetAssumptionKind::Guarded => "unchecked guardedness",
+                    pet::PetAssumptionKind::TypeInType => "unsafe universe hierarchy",
+                    pet::PetAssumptionKind::Uip => "definitional UIP",
+                    pet::PetAssumptionKind::SectionVariable => "section variable",
+                    pet::PetAssumptionKind::Opaque => "opaque constant",
+                    pet::PetAssumptionKind::Transparent => "transparent constant",
+                };
+                return Err(Error::new(
+                    ErrorKind::AxiomDependencyOutOfScope,
+                    format!("proof relies on {kind} '{canonical}'"),
+                ));
+            }
             let source = project.source_for_constant(&canonical).ok_or_else(|| {
                 Error::new(
                     ErrorKind::AxiomDependencyOutOfScope,
@@ -988,38 +1011,6 @@ fn render_goals(goals: &pet::PetGoals) -> String {
         rendered.push(lines.join("\n"));
     }
     rendered.join("\n\n")
-}
-
-fn parse_assumptions(report: &str) -> Result<Vec<String>> {
-    if report.contains("Closed under the global context") {
-        return Ok(Vec::new());
-    }
-    let names = report
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let (name, _) = line.split_once(" : ")?;
-            (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_owned())
-        })
-        .collect::<Vec<_>>();
-    if names.is_empty() {
-        Err(Error::new(
-            ErrorKind::InvalidConfiguration,
-            "PET assumption result is unrecognized",
-        ))
-    } else {
-        Ok(names)
-    }
-}
-
-fn locate_constant(report: &str) -> Option<String> {
-    report.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("Constant ")?
-            .split_whitespace()
-            .next()
-            .map(str::to_owned)
-    })
 }
 
 fn declaration_pet_error(error: pet::PetError) -> Error {
