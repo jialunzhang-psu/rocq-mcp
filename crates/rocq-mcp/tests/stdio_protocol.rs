@@ -31,10 +31,8 @@ fn call_tool(
 
 #[test]
 fn official_stdio_transport_serves_initialize_and_tools_list() {
-    let state = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
         .arg("--stdio")
-        .env("ROCQ_NEW_STATE_DIR", state.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -69,7 +67,6 @@ fn official_stdio_transport_serves_initialize_and_tools_list() {
 #[test]
 fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     let project = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("dune-project"),
         "(lang dune 3.22)\n(using rocq 0.12)\n",
@@ -85,7 +82,6 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
         .arg("--stdio")
-        .env("ROCQ_NEW_STATE_DIR", state.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -311,8 +307,8 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
         serde_json::json!({"attempts":["exact I."]}),
     );
     assert_eq!(
-        completed["structuredContent"]["state"]["status"],
-        "Completed"
+        completed["structuredContent"]["state"]["status"], "Completed",
+        "{completed}"
     );
     assert!(
         completed["structuredContent"]["state"]
@@ -332,7 +328,6 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
 #[test]
 fn start_survives_a_competing_dune_build() {
     let project = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
     let signal_dir = tempfile::tempdir().unwrap();
     let fifo = signal_dir.path().join("ready");
     assert!(
@@ -368,7 +363,6 @@ fn start_survives_a_competing_dune_build() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
         .arg("--stdio")
-        .env("ROCQ_NEW_STATE_DIR", state.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -409,7 +403,6 @@ fn start_survives_a_competing_dune_build() {
 #[test]
 fn absolute_custom_dune_build_dir_survives_start_and_proof_publication() {
     let project = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
     let build_dir = project.path().join("custom");
     fs::write(
         project.path().join("dune-project"),
@@ -428,7 +421,6 @@ fn absolute_custom_dune_build_dir_survives_start_and_proof_publication() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
         .arg("--stdio")
-        .env("ROCQ_NEW_STATE_DIR", state.path())
         .env("DUNE_BUILD_DIR", &build_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -500,9 +492,8 @@ fn absolute_custom_dune_build_dir_survives_start_and_proof_publication() {
 }
 
 #[test]
-fn type_query_uses_selected_proof_library_instead_of_first_catalog_library() {
+fn type_query_uses_selected_proof_library_instead_of_first_discovered_file() {
     let project = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("dune-project"),
         "(lang dune 3.22)\n(using rocq 0.12)\n",
@@ -523,7 +514,6 @@ fn type_query_uses_selected_proof_library_instead_of_first_catalog_library() {
     assert!(built.status.success(), "{:?}", built.stderr);
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
         .arg("--stdio")
-        .env("ROCQ_NEW_STATE_DIR", state.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -580,7 +570,6 @@ fn type_query_uses_selected_proof_library_instead_of_first_catalog_library() {
 #[test]
 fn abandon_discards_an_open_declaration_and_allows_redeclaration() {
     let project = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
     // Dune is the sole project/load-path authority; this fixture must not
     // rely on the removed legacy CoqProject walker.
     fs::write(
@@ -592,7 +581,6 @@ fn abandon_discards_an_open_declaration_and_allows_redeclaration() {
     fs::write(project.path().join("Main.v"), "Definition base := 0.\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
         .arg("--stdio")
-        .env("ROCQ_NEW_STATE_DIR", state.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

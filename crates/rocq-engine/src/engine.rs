@@ -1,922 +1,941 @@
-//! Thin orchestration over project state, PET, Dune, trace forest, and writeback.
+//! Stateless sequencing facade over the Dune, PET, and writeback wrappers.
+//!
+//! Active projects and checkpoint topology belong to `rocq-mcp`; `Engine`
+//! retains only operator configuration and never stores declarations, attempts,
+//! traces, or PET state IDs.
 
-use super::*;
-use crate::types::{DeclarationInstance, PetAnchor, PetRange, ProjectState, ProofAttempt};
-use std::{collections::BTreeMap, sync::Arc};
+use crate::types::{PetRange, PetWorkspace, SourceAnchor};
+use crate::{dune, pet, writeback, *};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Component, Path, PathBuf},
+    sync::{Arc, RwLock},
+};
 
-/// The semantic engine.  The forest stores only logical roots and canonical
-/// actions; PET state is deliberately not represented here.
-pub struct Engine {
-    pub(crate) config: EngineConfig,
-    pub(crate) pet: pet::PetRuntime,
-    /// One authoritative state object per canonical Dune workspace.  The
-    /// trace forest is owned by this object; no global cross-project forest
-    /// exists.
-    pub(crate) projects: Mutex<BTreeMap<PathBuf, Arc<Mutex<ProjectState>>>>,
+/// Canonical Dune workspace identity plus its current Dune-selected view.
+///
+/// Clones share the view so one project runtime can refresh it atomically at
+/// request admission without replacing the runtime or its PET actor.
+#[derive(Clone)]
+pub struct DuneProject {
+    root: PathBuf,
+    layout: Arc<RwLock<dune::Layout>>,
 }
 
-impl Drop for Engine {
-    fn drop(&mut self) {
-        // Design note: native children are reaped before project-owned runtime state is dropped.
-        self.pet.shutdown();
+impl DuneProject {
+    pub fn id(&self) -> &Path {
+        &self.root
     }
+
+    fn source(&self, file: &FileId) -> Result<PathBuf> {
+        validate_file_id(file)?;
+        let path = fs::canonicalize(self.root.join(&file.0))
+            .map_err(|_| Error::new(ErrorKind::NotFound, "requested source file is unavailable"))?;
+        if !self.read_layout().contains_file(&path) {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                "Dune has not selected the requested source file",
+            ));
+        }
+        Ok(path)
+    }
+
+    pub(crate) fn pet_workspace(&self, source: &Path) -> Result<PetWorkspace> {
+        self.read_layout().pet_workspace(source)
+    }
+
+    pub(crate) fn build_target(&self, source: &Path) -> Result<PathBuf> {
+        self.read_layout().build_target(source)
+    }
+
+    fn library(&self, source: &Path) -> Result<LogicalLibrary> {
+        self.read_layout().library(source).cloned()
+    }
+
+    fn source_for_constant(&self, constant: &str) -> Option<PathBuf> {
+        self.read_layout().source_for_constant(constant)
+    }
+
+    fn files(&self) -> Vec<PathBuf> {
+        self.read_layout().files()
+    }
+
+    fn replace_layout(&self, layout: dune::Layout) -> bool {
+        let mut current = self
+            .layout
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current == layout {
+            return false;
+        }
+        *current = layout;
+        true
+    }
+
+    fn read_layout(&self) -> std::sync::RwLockReadGuard<'_, dune::Layout> {
+        self.layout
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Thin operation facade. It is safe to share because it has no live project
+/// or proof state.
+pub struct Engine {
+    config: EngineConfig,
 }
 
 impl Engine {
-    /// Return the canonical project path and its project-owned operation gate.
-    /// The project map is the sole registry; no parallel attachment table or
-    /// filesystem lock directory exists.
-    fn project_access(&self, project: &Path) -> Result<(PathBuf, Arc<std::sync::RwLock<()>>)> {
-        let root = std::fs::canonicalize(project).map_err(|_| {
+    pub fn new(config: EngineConfig) -> Result<Self> {
+        Ok(Self { config })
+    }
+
+    /// Resolve a caller path through Dune and retain its typed selected layout.
+    /// PET is not started by attachment.
+    pub fn attach(&self, requested: &Path) -> Result<DuneProject> {
+        let requested = fs::canonicalize(requested).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidConfiguration,
                 "project path is unavailable",
             )
         })?;
-        let state = self.project_state(&root)?;
-        let state = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok((state.root.clone(), Arc::clone(&state.gate)))
-    }
-
-    pub fn new(config: EngineConfig) -> Result<Self> {
-        if !(1..=64).contains(&config.max_pet_processes) {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "max PET processes must be between 1 and 64",
-            ));
-        }
-        let pet = pet::PetRuntime::new(
-            config.operation_timeout,
-            config.max_pet_processes,
-            config.runtime_cache_bytes,
-        )
-        .map_err(|error| Error::new(ErrorKind::InvalidConfiguration, error.to_string()))?;
-        Ok(Self {
-            config,
-            pet,
-            projects: Mutex::new(BTreeMap::new()),
+        let (root, layout) = dune::Layout::load(&requested, self.config.command_timeout)?;
+        Ok(DuneProject {
+            root,
+            layout: Arc::new(RwLock::new(layout)),
         })
     }
 
-    /// Attach a caller path to its canonical Dune workspace without starting
-    /// PET or indexing declarations.  Success guarantees that subsequent
-    /// connection-scoped operations have one initialized ProjectState.
-    pub fn attach(&self, project: &Path) -> Result<PathBuf> {
-        let attached = std::fs::canonicalize(project).map_err(|_| {
-            Error::new(
+    /// Re-query Dune and atomically replace the cached typed view when its
+    /// selected files, libraries, targets, or PET load paths changed.
+    ///
+    /// Returns `true` exactly when the caller must begin a new PET epoch and
+    /// invalidate all exported state IDs for this project. A workspace-root
+    /// identity change fails closed and requires an explicit `start`.
+    pub fn refresh_project(&self, project: &DuneProject) -> Result<bool> {
+        let (root, layout) = dune::Layout::load(&project.root, self.config.command_timeout)?;
+        if root != project.root {
+            return Err(Error::new(
                 ErrorKind::InvalidConfiguration,
-                "project path is unavailable",
-            )
-        })?;
-        // Every explicit start revalidates Dune. Internal calls use the
-        // canonical returned root and may take `project_state`'s fast path.
-        let root = dune::dune_workspace_root(&attached, self.config.operation_timeout)?;
-        self.project_state_for_root(root.clone())?;
-        Ok(root)
-    }
-
-    /// Returns the one state object for a canonical workspace, creating its
-    /// project-local trace forest on first access. Temporary Dune views are
-    /// queried on demand; project state retains only touched
-    /// declarations and trace roots.
-    pub(crate) fn project_state(&self, project: &Path) -> Result<Arc<Mutex<ProjectState>>> {
-        let attached = std::fs::canonicalize(project).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidConfiguration,
-                "project path is unavailable",
-            )
-        })?;
-        // The MCP selection stores the canonical root returned by `attach`.
-        // Avoid rediscovering that same Dune workspace on every later call;
-        // only a previously unseen path needs Dune identity resolution.
-        if let Some(state) = self
-            .projects
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&attached)
-            .cloned()
-        {
-            return Ok(state);
+                "Dune workspace identity changed; call start again",
+            ));
         }
-        // Dune's workspace identity is the project identity. Attaching two
-        // subdirectories of one workspace must resolve to one ProjectState.
-        let project = dune::dune_workspace_root(&attached, self.config.operation_timeout)?;
-        self.project_state_for_root(project)
+        Ok(project.replace_layout(layout))
     }
 
-    /// Return or initialize the sole state object for an already
-    /// Dune-canonicalized workspace root. No Dune command is issued here.
-    fn project_state_for_root(&self, project: PathBuf) -> Result<Arc<Mutex<ProjectState>>> {
-        let mut projects = self
-            .projects
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(state) = projects.get(&project) {
-            return Ok(Arc::clone(state));
-        }
-        let traces = TraceForest::new(ForestConfig::new(
-            self.config.trace_memory_bytes,
-            &self.config.state_parent,
-        ))
-        .map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidConfiguration,
-                "trace state directory cannot be initialized",
-            )
-        })?;
-        let state = Arc::new(Mutex::new(ProjectState {
-            root: project.clone(),
-            gate: Arc::new(std::sync::RwLock::new(())),
-            traces: Arc::new(traces),
-            touched: BTreeMap::new(),
-        }));
-        projects.insert(project, Arc::clone(&state));
-        Ok(state)
-    }
-
-    /// Return the trace forest owned by one canonical project state.
-    pub(crate) fn traces_for_project(
-        &self,
-        project: &Path,
-    ) -> Result<Arc<TraceForest<DeclarationSource, CanonicalTactic>>> {
-        Ok(Arc::clone(
-            &self
-                .project_state(project)?
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .traces,
-        ))
-    }
-
-    pub(crate) fn traces_for_attempt(
-        &self,
-        attempt: AttemptId,
-    ) -> Result<Arc<TraceForest<DeclarationSource, CanonicalTactic>>> {
-        let project = self.attempt_project(attempt)?;
-        self.traces_for_project(&project)
-    }
-
-    /// Return Dune-selected source files as workspace-relative IDs. This is a
-    /// Dune operation and does not start PET or parse source files.
-    pub fn list_files(&self, project: &Path) -> Result<Vec<FileId>> {
-        let (project, gate) = self.project_access(project)?;
-        let _read = gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dune = dune::Layout::load(
-            &project,
-            &self.owned_path(&project),
-            self.config.operation_timeout,
-        )?;
-        dune.files()
-            .into_iter()
+    /// Return only Dune-selected source identities.
+    pub fn list_files(&self, project: &DuneProject) -> Result<Vec<FileId>> {
+        project
+            .files()
+            .iter()
             .map(|path| {
-                FileId::from_path(&project, &path)
+                FileId::from_path(&project.root, path)
                     .map_err(|message| Error::new(ErrorKind::InvalidConfiguration, message))
             })
             .collect()
     }
 
-    /// Return PET document declarations from exactly one Dune-selected source.
-    pub fn list_decls(&self, project: &Path, file: &FileId) -> Result<Vec<DeclarationInfo>> {
-        let (project, gate) = self.project_access(project)?;
-        let _read = gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source = project.join(&file.0);
-        let dune = dune::Layout::load(
-            &project,
-            &self.owned_path(&project),
-            self.config.operation_timeout,
-        )?;
-        if !dune.contains_file(&source) {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "Dune has not selected the requested source file",
-            ));
-        }
-        self.pet
-            .document_declarations(&dune, &source)
-            .map_err(|error| self.pet_error(error))
-            .map(|declarations| {
-                declarations
-                    .into_values()
-                    .map(|source| source.info)
-                    .collect()
-            })
+    /// Ask PET once for one document and project supported proof declarations
+    /// onto the public identity/type shape.
+    pub fn list_decls(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        file: &FileId,
+    ) -> Result<Vec<DeclarationInfo>> {
+        Ok(self
+            .declarations(project, actor, file)?
+            .into_iter()
+            .filter_map(|declaration| declaration.target.map(|target| target.info))
+            .collect())
     }
 
-    /// Opens one PET-parsed unfinished declaration. Existing declarations are
-    /// checked by PET and Dune/Rocq before
-    /// returning a completed state; no source-text status is trusted.
-    pub fn open(&self, project: &Path, identity: DeclarationIdentity) -> Result<ProofState> {
-        self.open_declaration(project, identity)
-    }
-
-    /// Open a declaration returned by `list_decls`. PET resolves only the
-    /// declaration's source file; unrelated workspace files are untouched.
+    /// Select an exact PET declaration. PET-finished declarations are returned
+    /// as `Published` so MCP can perform the required project epoch transition.
     pub fn open_declaration(
         &self,
-        project: &Path,
+        project: &DuneProject,
+        actor: &pet::PetActor,
         identity: DeclarationIdentity,
-    ) -> Result<ProofState> {
+    ) -> Result<OpenResult> {
         validate_identity(&identity)?;
-        let project = self.load_declaration(project, &identity)?;
-        self.open_inner_loaded(&project, identity)
-    }
-
-    /// Load one declaration from its authoritative PET source and remember it
-    /// as touched. No workspace-wide declaration index is constructed.
-    fn load_declaration(&self, project: &Path, identity: &DeclarationIdentity) -> Result<PathBuf> {
-        validate_identity(identity)?;
-        let (project, gate) = self.project_access(project)?;
-        let _read = gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source_path = project.join(&identity.file.0);
-        let dune = dune::Layout::load(
-            &project,
-            &self.owned_path(&project),
-            self.config.operation_timeout,
-        )?;
-        if !dune.contains_file(&source_path) {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "Dune has not selected the declaration source",
-            ));
-        }
-        let sources = self
-            .pet
-            .document_declarations(&dune, &source_path)
-            .map_err(|error| self.pet_error(error))?;
-        let source = sources.get(identity).cloned().ok_or_else(|| {
+        let resolved = self.resolve(project, actor, &identity)?;
+        let target = resolved.target.ok_or_else(|| {
             Error::new(
-                ErrorKind::NotFound,
-                format!("declaration '{}' was not found", format_name(identity)),
+                ErrorKind::InvalidDeclaration,
+                "target is not a proof declaration",
             )
         })?;
-        let project_state = self.project_state(&project)?;
-        let mut state = project_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match state.touched.entry(identity.clone()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(DeclarationInstance {
-                    source,
-                    attempts: BTreeMap::new(),
-                });
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                // Design note: a successful writeback changes the file digest
-                // while older trace roots remain valid only for their old
-                // snapshot. Refresh the declaration anchor for a new open,
-                // but retain old attempt handles so a subsequent step can
-                // deterministically report DeclarationChanged.
-                if entry.get().source.anchor.digest != source.anchor.digest {
-                    entry.get_mut().source = source;
-                }
-            }
+        if resolved.proof_finished {
+            return Ok(OpenResult::Published(target));
         }
-        Ok(project)
-    }
-
-    /// Reconstruct the PET source anchor from the declaration-owned state.
-    /// Query resolution uses this single identity-keyed record and never a
-    /// second source index.
-    pub(crate) fn source_for_identity(
-        &self,
-        project: &Path,
-        identity: &DeclarationIdentity,
-    ) -> Result<DeclarationSource> {
-        let state = self.project_state(project)?;
-        let state = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let declaration = state.touched.get(identity).ok_or_else(|| {
-            Error::new(
-                ErrorKind::NotFound,
-                "declaration has no source document yet",
-            )
-        })?;
-        let anchor = &declaration.source.anchor;
-        if anchor.header.start >= anchor.header.end
-            || !anchor.source.is_file()
-            || std::fs::read(&anchor.source)
-                .ok()
-                .is_none_or(|bytes| <[u8; 32]>::from(Sha256::digest(&bytes)) != anchor.digest)
-        {
+        if !target.anchor.replaceable {
             return Err(Error::new(
-                ErrorKind::DeclarationChanged,
-                "declaration source anchor is unavailable",
+                ErrorKind::InvalidDeclaration,
+                "declaration shares one PET source command with another declaration",
             ));
         }
-        Ok(declaration.source.clone())
+        self.open_target(project, actor, target)
+            .map(OpenResult::Open)
     }
 
-    fn open_inner_loaded(
-        &self,
-        project: &Path,
-        identity: DeclarationIdentity,
-    ) -> Result<ProofState> {
-        validate_identity(&identity)?;
-        let (project, project_gate) = self.project_access(project)?;
-        let _gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let info = {
-            let state = self.project_state(&project)?;
-            let state = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let declaration = state.touched.get(&identity).ok_or_else(|| {
-                Error::new(
-                    ErrorKind::NotFound,
-                    format!("declaration '{}' was not found", format_name(&identity)),
-                )
-            })?;
-            DeclarationInfo {
-                identity: declaration.source.info.identity.clone(),
-                kind: declaration.source.info.kind,
-                statement: declaration.source.info.statement.clone(),
-            }
-        };
-
-        let source = self.source_for_identity(&project, &identity)?;
-        let source = self
-            .pet
-            .source_span(&project, &source)
-            .map_err(|error| self.pet_error(error))?;
-        let proof_completed = self
-            .pet
-            .source_proof_completed(&project, &source)
-            .map_err(|error| self.pet_error(error))?;
-        if proof_completed {
-            // Design note: PET recovers some invalid Qed scripts as self-axioms.
-            // A source terminator is not a proof result: native compilation
-            // must succeed before PET's assumption view can be trusted.
-            let target = source.anchor.source.strip_prefix(&project).map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "source target escapes project",
-                )
-            })?;
-            writeback::native_build(
-                &project,
-                target,
-                self.config.close_timeout,
-                self.config.operation_timeout,
-            )?;
-            let assumptions = self
-                .pet
-                .source_assumptions(
-                    &project,
-                    &source.anchor.source,
-                    source
-                        .anchor
-                        .declaration
-                        .as_ref()
-                        .ok_or_else(|| {
-                            Error::new(
-                                ErrorKind::DeclarationChanged,
-                                "PET declaration range is unavailable",
-                            )
-                        })?
-                        .end,
-                    source.anchor.digest,
-                    Some((
-                        source.info.identity.constant().unwrap_or_default(),
-                        source.info.kind,
-                        source.anchor.header.end,
-                    )),
-                    identity.constant().unwrap_or_default(),
-                )
-                .map_err(|error| self.pet_error(error))?;
-            writeback::audit_existing_source(
-                self,
-                &project,
-                &source,
-                &assumptions,
-                self.config.operation_timeout,
-                self.config.close_timeout,
-            )?;
-            return Ok(state(None, info, ProofLifecycle::Completed));
-        }
-        let open = source.clone();
-        let key = root_key(&open)?;
-        let traces = self.traces_for_project(&project)?;
-        let cursor = traces
-            .open(key, || Ok::<_, Error>(open.clone()))
-            .map_err(trace_call_error)?;
-        self.remember_attempt(cursor, &project);
-        // Design note: opening is an interactive operation, so its goals must
-        // come from PET rather than a topology-only placeholder.
-        let native = self
-            .pet
-            .restore_state(&project, &open, None, &[])
-            .map_err(|error| self.pet_error(error))?;
-        self.remember_pet_state(AttemptId(cursor), &native, 0);
-        Ok(self.state_from_pet(AttemptId(cursor), &open, &native, ProofLifecycle::Open))
-    }
-
-    /// Declares a logical theorem without editing source. Dune selects the
-    /// insertion file and PET validates the declaration by running its header
-    /// from the target file's end state; the anchor stores immutable bytes.
+    /// Validate a new declaration header at PET's exact module insertion state.
+    /// Disk is untouched until publication.
     pub fn declare(
         &self,
-        project: &Path,
+        project: &DuneProject,
+        actor: &pet::PetActor,
         kind: DeclarationKind,
         identity: DeclarationIdentity,
-        statement: String,
-    ) -> Result<ProofState> {
-        self.declare_inner(project, kind, identity, statement)
-    }
-
-    /// Discards every unpublished trace root for one exactly identified
-    /// declaration. Source is never edited.
-    ///
-    /// All source-version roots are retired before their attempt records are
-    /// removed. If retirement fails, the records remain addressable so the
-    /// caller never loses the only handle to an unretired trace.
-    pub fn abandon(&self, project: &Path, identity: DeclarationIdentity) -> Result<String> {
+        library: &LogicalLibrary,
+        statement: &str,
+    ) -> Result<OpenedProof> {
         validate_identity(&identity)?;
-        let (project, project_gate) = self.project_access(project)?;
-        let traces = self.traces_for_project(&project)?;
-        let _gate = project_gate
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = self.project_state(&project)?;
-        let state = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cursors = state
-            .touched
-            .get(&identity)
-            .map(|declaration| {
-                declaration
-                    .attempts
-                    .keys()
-                    .map(|attempt| attempt.0)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        drop(state);
-        if cursors.is_empty() {
+        let statement = statement.trim().trim_end_matches('.').trim();
+        if statement.is_empty() {
             return Err(Error::new(
-                ErrorKind::NotFound,
-                "no active unpublished proof has that declaration",
+                ErrorKind::InvalidDeclaration,
+                "declaration statement is empty",
             ));
         }
-        // Design note: one DeclarationId can own simultaneous attempts rooted
-        // in different source digests. Closing one cursor retires only that
-        // cursor's root family, so visit every remembered cursor; repeated
-        // cursors from one family harmlessly report AlreadyRetired/UnknownCursor
-        // after the first close and need no wrapper-side root index.
-        for cursor in &cursors {
-            match traces.close(*cursor, |_| Ok::<(), Error>(())) {
-                Ok(_)
-                | Err(trace_forest::CallError::Forest(trace_forest::Error::UnknownCursor)) => {}
-                Err(error) => return Err(trace_call_error(error)),
-            }
+        let source = project.source(&identity.file)?;
+        let actual_library = project.library(&source)?;
+        if &actual_library != library {
+            return Err(Error::new(
+                ErrorKind::InvalidDeclaration,
+                "file does not belong to the requested Dune logical library",
+            ));
         }
-        let state = self.project_state(&project)?;
-        let mut state = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(declaration) = state.touched.get_mut(&identity) {
-            for cursor in cursors {
-                declaration.attempts.remove(&AttemptId(cursor));
-            }
-        }
-        // A declaration without a PET source range exists only because this
-        // process declared it interactively. Once its trace is abandoned it
-        // has no remaining owner and must not shadow a later declaration.
-        if state.touched.get(&identity).is_some_and(|declaration| {
-            declaration.source.anchor.header.start >= declaration.source.anchor.header.end
-        }) {
-            state.touched.remove(&identity);
-        }
-        self.pet.invalidate_states(&project);
-        Ok(format_name(&identity))
-    }
-    fn declare_inner(
-        &self,
-        project: &Path,
-        kind: DeclarationKind,
-        identity: DeclarationIdentity,
-        statement: String,
-    ) -> Result<ProofState> {
-        validate_new_declaration(&identity, &statement)?;
-        let (project, project_gate) = self.project_access(project)?;
-        let _gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let relative = relative_path(&identity, library)?;
+        let (leaf, modules) = relative.split_last().ok_or_else(|| {
+            Error::new(ErrorKind::InvalidDeclaration, "declaration path is empty")
+        })?;
         if self
-            .project_state(&project)?
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .touched
-            .contains_key(&identity)
+            .declarations(project, actor, &identity.file)?
+            .into_iter()
+            .any(|declaration| declaration.identity == identity)
         {
             return Err(Error::new(
                 ErrorKind::InvalidDeclaration,
                 "declaration identity is already present",
             ));
         }
-
-        let layout = dune::Layout::load(&project, &[], self.config.operation_timeout)?;
-        let path = project.join(&identity.file.0);
-        if !path.starts_with(&project) {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "declaration target is outside the project",
-            ));
-        }
-        if !layout.files().contains(&path) {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "Dune has not selected the declaration target source",
-            ));
-        }
-        let source = std::fs::read(&path).map_err(|_| {
+        let workspace = project.pet_workspace(&source)?;
+        let insertion = actor
+            .insertion_point(&workspace, &source, modules)
+            .map_err(declaration_pet_error)?;
+        let bytes = fs::read(&source).map_err(|_| {
             Error::new(
-                ErrorKind::InvalidConfiguration,
-                "declaration target is unavailable",
+                ErrorKind::DeclarationChanged,
+                "target source is unavailable",
             )
         })?;
-
-        let source_digest = Sha256::digest(&source).into();
-        let normalized_statement = new_declaration_header(kind, &identity, &statement)?;
-        // Design note: pass one immutable declaration descriptor through the
-        // PET placement check so identity, kind, and header cannot diverge
-        // between validation and the trace root created below.
-        let declaration_info = DeclarationInfo {
-            identity: identity.clone(),
-            kind,
-            statement: normalized_statement.clone(),
-        };
-        let library = layout.library(&path)?.clone();
-        let identity_prefix = &identity.qualified_path[..identity.qualified_path.len() - 1];
-        if !identity_prefix.starts_with(&library.0) {
+        if insertion > bytes.len() {
             return Err(Error::new(
                 ErrorKind::InvalidConfiguration,
-                "logical library is not selected by Dune",
+                "PET insertion range is invalid",
             ));
         }
-        let modules = &identity_prefix[library.0.len()..];
-        let insertion = self
-            .pet
-            .insertion_offset(&project, &path, source_digest, modules, &declaration_info)
-            .map_err(|error| self.pet_error(error))?;
-        let open = DeclarationSource {
-            info: declaration_info,
-            library,
-            anchor: PetAnchor {
-                source: path,
-                digest: source_digest,
-                // A zero-width PET-derived range denotes a new declaration's
-                // exact insertion point; it is not a sentinel for file zero.
+        let header = format!("{} {} : {}", kind.keyword(), leaf, statement);
+        let base = actor
+            .state_at(&workspace, &source, insertion)
+            .map_err(declaration_pet_error)?;
+        let opened = actor
+            .run(base.state, &format!("{header}."))
+            .map_err(declaration_pet_error);
+        let opened = release_after(actor, base.state, opened)?;
+        if let Err(error) = require_open_proof(&opened) {
+            actor
+                .release_states(&[opened.state])
+                .map_err(declaration_pet_error)?;
+            return Err(error);
+        }
+        let info = DeclarationInfo {
+            identity,
+            kind,
+            statement: header.clone(),
+        };
+        let target = DeclarationTarget {
+            info: info.clone(),
+            library: library.clone(),
+            anchor: SourceAnchor {
+                source,
+                digest: Sha256::digest(&bytes).into(),
                 header: PetRange {
                     start: insertion,
                     end: insertion,
                 },
-                declaration: None,
+                declaration: PetRange {
+                    start: insertion,
+                    end: insertion,
+                },
+                replaceable: true,
             },
+            new_header: Some(header),
         };
-        let traces = self.traces_for_project(&project)?;
-        let cursor = traces
-            .open(root_key(&open)?, || Ok::<_, Error>(open.clone()))
-            .map_err(trace_call_error)?;
-        #[cfg(all(feature = "fault-injection", unix))]
-        declare_race_barrier()?;
-        self.remember_attempt(cursor, &project);
-        let native = self
-            .pet
-            .restore_state(&project, &open, None, &[])
-            .map_err(|error| self.pet_error(error))?;
-        self.remember_pet_state(AttemptId(cursor), &native, 0);
-        Ok(self.state_from_pet(AttemptId(cursor), &open, &native, ProofLifecycle::Open))
+        Ok(OpenedProof {
+            target,
+            state: opened.state,
+            view: proof_state(info, &opened.goals),
+            finished: opened.proof_finished,
+        })
     }
 
-    /// Register a TraceForest cursor under its declaration-owned project state.
-    /// PET evaluation and trace publication happen before this bookkeeping, so
-    /// a rejected fragment is never registered as an attempt.
-    pub(crate) fn remember_attempt(&self, cursor: CursorId, project: &Path) {
-        let traces = self
-            .traces_for_project(project)
-            .expect("project state exists before an attempt is remembered");
-        if let Ok(view) = traces.inspect(cursor)
-            && let Ok(state) = self.project_state(project)
-        {
-            let mut state = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let root = view.root().clone();
-            let declaration = state
-                .touched
-                .entry(root.info.identity.clone())
-                .or_insert_with(|| DeclarationInstance {
-                    source: root.clone(),
-                    attempts: BTreeMap::new(),
-                });
-            declaration
-                .attempts
-                .insert(AttemptId(cursor), ProofAttempt { pet_state: None });
-        }
-        // Design note: the declaration map is the sole owner of attempts.
-        // Project lookup is derived by walking those authoritative records;
-        // no second cursor-to-project state table is maintained.
-    }
-    pub(crate) fn attempt_project(&self, attempt: AttemptId) -> Result<PathBuf> {
-        let projects = self
-            .projects
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (project, state) in projects.iter() {
-            let state = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state
-                .touched
-                .values()
-                .any(|declaration| declaration.attempts.contains_key(&attempt))
-            {
-                return Ok(project.clone());
-            }
-        }
-        Err(Error::new(
-            ErrorKind::NotFound,
-            "proof attempt is no longer open",
-        ))
-    }
-
-    /// Cache PET's opaque proof handle beside the owning declaration attempt.
-    /// The handle is only a valid fast path while its process epoch matches;
-    /// PET replay remains the recovery path after eviction or restart.
-    pub(crate) fn remember_pet_state(
+    /// Recreate only a proof root. MCP replays its own root-to-checkpoint list.
+    pub fn replay_root(
         &self,
-        attempt: AttemptId,
-        native: &pet::PetState,
-        prefix_len: usize,
-    ) {
-        let Ok(project) = self.attempt_project(attempt) else {
-            return;
-        };
-        let Ok(state) = self.project_state(&project) else {
-            return;
-        };
-        let mut state = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(declaration) = state
-            .touched
-            .values_mut()
-            .find(|declaration| declaration.attempts.contains_key(&attempt))
-            && let Some(record) = declaration.attempts.get_mut(&attempt)
-        {
-            record.pet_state = Some(crate::types::PetProofState {
-                instance_epoch: native.instance_epoch,
-                state: native.st,
-                prefix_len,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+    ) -> Result<OpenedProof> {
+        self.validate_target(project, target)?;
+        if target.is_new() {
+            let workspace = project.pet_workspace(&target.anchor.source)?;
+            let base = actor
+                .state_at(
+                    &workspace,
+                    &target.anchor.source,
+                    target.anchor.header.start,
+                )
+                .map_err(declaration_pet_error)?;
+            let header = target.new_header.as_deref().expect("new target has header");
+            let opened = actor
+                .run(base.state, &format!("{header}."))
+                .map_err(declaration_pet_error);
+            let opened = release_after(actor, base.state, opened)?;
+            if let Err(error) = require_open_proof(&opened) {
+                actor
+                    .release_states(&[opened.state])
+                    .map_err(declaration_pet_error)?;
+                return Err(error);
+            }
+            return Ok(OpenedProof {
+                target: target.clone(),
+                state: opened.state,
+                view: proof_state(target.info.clone(), &opened.goals),
+                finished: opened.proof_finished,
             });
         }
-    }
-
-    /// Resolve an attempt's live PET handle, replaying its trace only when the
-    /// handle was evicted, invalidated, or belongs to a different prefix.
-    fn pet_state_for_attempt(
-        &self,
-        project: &Path,
-        attempt: AttemptId,
-        root: &DeclarationSource,
-        actions: &[CanonicalTactic],
-    ) -> Result<pet::PetState> {
-        // Design note: this is the single gateway from an engine attempt to
-        // PET state. Validate both the immutable source anchor and Dune's
-        // current source selection here so no cached-handle caller can bypass
-        // the project environment contract.
-        self.validate_attempt_environment(project, root)?;
-        let handle = self
-            .project_state(project)?
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .touched
-            .values()
-            .find_map(|declaration| declaration.attempts.get(&attempt))
-            .and_then(|record| record.pet_state)
-            .filter(|handle| handle.prefix_len == actions.len());
-        let preferred = handle.map(|handle| (handle.instance_epoch, handle.state));
-        let native = self
-            .pet
-            .restore_state(project, root, preferred, actions)
-            .map_err(|error| self.pet_error(error))?;
-        self.remember_pet_state(attempt, &native, actions.len());
-        Ok(native)
-    }
-
-    /// Verify that an immutable trace root still names the exact source bytes
-    /// from which PET created it.  Every operation that resumes an attempt
-    /// uses this one check before consulting an opaque PET state.
-    fn validate_attempt_source(&self, project: &Path, root: &DeclarationSource) -> Result<()> {
-        let bytes = std::fs::read(&root.anchor.source).map_err(|_| {
-            Error::new(
+        let current = self
+            .resolve(project, actor, &target.info.identity)
+            .map_err(|error| {
+                if error.kind == ErrorKind::NotFound {
+                    Error::new(
+                        ErrorKind::DeclarationChanged,
+                        "target identity changed in the current Dune/PET context",
+                    )
+                } else {
+                    error
+                }
+            })?;
+        let current = current
+            .target
+            .ok_or_else(|| Error::new(ErrorKind::DeclarationChanged, "declaration kind changed"))?;
+        if current.info != target.info || current.anchor.digest != target.anchor.digest {
+            return Err(Error::new(
                 ErrorKind::DeclarationChanged,
-                "declaration source changed while proof was open",
+                "target declaration changed while proof was open",
+            ));
+        }
+        self.open_target(project, actor, current)
+    }
+
+    /// Execute one complete proof fragment directly through PET.
+    pub fn run(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+        state: pet::PetStateId,
+        fragment: &str,
+    ) -> Result<ProofStep> {
+        self.validate_target(project, target)?;
+        validate_fragment(fragment)?;
+        let execution = actor.run(state, fragment).map_err(step_pet_error)?;
+        if !execution.goals.proof_mode || !execution.goals.given_up.is_empty() {
+            actor
+                .release_states(&[execution.state])
+                .map_err(step_pet_error)?;
+            return Err(Error::new(
+                ErrorKind::ProofStepFailed,
+                "PET rejected a proof-closing, global, or goal-giving-up fragment",
+            ));
+        }
+        Ok(ProofStep {
+            state: execution.state,
+            view: proof_state(target.info.clone(), &execution.goals),
+            finished: execution.proof_finished,
+        })
+    }
+
+    pub fn goals(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+        state: pet::PetStateId,
+    ) -> Result<ProofState> {
+        self.validate_target(project, target)?;
+        let goals = actor.goals(state).map_err(step_pet_error)?;
+        if !goals.proof_mode {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                "PET proof state is no longer open",
+            ));
+        }
+        Ok(proof_state(target.info.clone(), &goals))
+    }
+
+    /// Run a semantic query in a caller-owned proof state.
+    pub fn query_state(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+        state: pet::PetStateId,
+        query: PetQuery,
+    ) -> Result<String> {
+        self.validate_target(project, target)?;
+        actor.query(state, &query).map_err(query_pet_error)
+    }
+
+    /// Run a semantic query after one exact source declaration, releasing the
+    /// temporary context state before returning.
+    pub fn query_at(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        identity: &DeclarationIdentity,
+        query: PetQuery,
+    ) -> Result<String> {
+        let resolved = self.resolve(project, actor, identity)?;
+        let target = resolved.target.ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidDeclaration,
+                "query target is not supported",
             )
         })?;
-        if <[u8; 32]>::from(Sha256::digest(&bytes)) != root.anchor.digest {
-            self.pet.detach(project);
+        let workspace = project.pet_workspace(&target.anchor.source)?;
+        let context = actor
+            .state_at(
+                &workspace,
+                &target.anchor.source,
+                target.anchor.declaration.end,
+            )
+            .map_err(query_pet_error)?;
+        let result = actor.query(context.state, &query).map_err(query_pet_error);
+        let released = actor
+            .release_states(&[context.state])
+            .map_err(query_pet_error);
+        match released {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Build, refresh, reopen, and trust-audit a PET-finished target.
+    /// The MCP caller must hold the project publication barrier and invalidate
+    /// all checkpoint state IDs before calling.
+    pub fn validate_published(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+    ) -> Result<ProofState> {
+        // Design note: a PET-finished declaration is still only a snapshot of
+        // the bytes PET inspected during `prove`. Validate that snapshot
+        // before running Dune; otherwise an external editor could replace an
+        // admitted/closed declaration between resolution and the native build
+        // and we would report the replacement as the requested theorem.
+        self.validate_target(project, target)?;
+        writeback::build_and_refresh(
+            project,
+            actor,
+            &target.anchor.source,
+            self.config.command_timeout,
+            |project, actor| {
+                // The build runs outside Rust's source CAS.  Check again
+                // after it returns so an editor racing the build cannot make
+                // a different declaration appear completed.
+                self.validate_target(project, target)?;
+                let resolved = self.resolve(project, actor, &target.info.identity)?;
+                if !resolved.proof_finished {
+                    return Err(Error::new(
+                        ErrorKind::InvalidDeclaration,
+                        "built declaration is not a completed PET proof",
+                    ));
+                }
+                let current = resolved.target.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidDeclaration,
+                        "built declaration disappeared",
+                    )
+                })?;
+                self.audit_target(project, actor, &current)?;
+                Ok(completed_state(current.info))
+            },
+        )
+    }
+
+    /// Validate PET's finalizer while the current epoch is still live. The MCP
+    /// coordinator invalidates every checkpoint only after this succeeds.
+    pub fn close_proof(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+        final_state: pet::PetStateId,
+    ) -> Result<()> {
+        self.validate_target(project, target)?;
+        let closed = actor
+            .run(final_state, target.info.kind.terminator())
+            .map_err(step_pet_error)?;
+        if closed.goals.proof_mode || !closed.proof_finished {
+            actor
+                .release_states(&[closed.state])
+                .map_err(step_pet_error)?;
+            return Err(Error::new(
+                ErrorKind::ProofStepFailed,
+                "PET did not close the proof",
+            ));
+        }
+        actor
+            .release_states(&[closed.state])
+            .map_err(step_pet_error)
+    }
+
+    /// Publish one already-finalized linear MCP checkpoint path. The caller
+    /// holds the project barrier and has invalidated all pre-write state IDs.
+    pub fn publish(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+        fragments: &[String],
+        begin_epoch: impl FnOnce(),
+    ) -> Result<ProofState> {
+        self.validate_target(project, target)?;
+        let publication = writeback::prepare(project, target, fragments)?;
+        begin_epoch();
+        writeback::publish(
+            project,
+            actor,
+            publication,
+            self.config.command_timeout,
+            |project, actor| {
+                let resolved = self.resolve(project, actor, &target.info.identity)?;
+                if !resolved.proof_finished {
+                    return Err(Error::new(
+                        ErrorKind::InvalidDeclaration,
+                        "written declaration is not a completed PET proof",
+                    ));
+                }
+                let current = resolved.target.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidDeclaration,
+                        "written declaration disappeared",
+                    )
+                })?;
+                if current.info.identity != target.info.identity
+                    || current.info.kind != target.info.kind
+                {
+                    return Err(Error::new(
+                        ErrorKind::DeclarationChanged,
+                        "written declaration identity changed",
+                    ));
+                }
+                self.audit_target(project, actor, &current)?;
+                Ok(completed_state(current.info))
+            },
+        )
+    }
+
+    pub fn validate_target(&self, project: &DuneProject, target: &DeclarationTarget) -> Result<()> {
+        let selected = project
+            .source(&target.info.identity.file)
+            .map_err(|error| {
+                if error.kind == ErrorKind::NotFound {
+                    Error::new(
+                        ErrorKind::DeclarationChanged,
+                        "Dune no longer selects the proof's source file",
+                    )
+                } else {
+                    error
+                }
+            })?;
+        if selected != target.anchor.source {
             return Err(Error::new(
                 ErrorKind::DeclarationChanged,
-                "declaration source changed while proof was open",
+                "Dune source selection changed",
             ));
         }
-        Ok(())
-    }
-
-    /// Validate Dune's current source-selection contract before a new
-    /// operation consumes a cached PET state. Source bytes are checked first
-    /// so edits/deletions retain the precise `declaration_changed` diagnostic.
-    fn validate_attempt_environment(&self, project: &Path, root: &DeclarationSource) -> Result<()> {
-        self.validate_attempt_source(project, root)?;
-        let layout = dune::Layout::load(
-            project,
-            &self.owned_path(project),
-            self.config.operation_timeout,
-        )?;
-        if !layout.contains_file(&root.anchor.source) {
+        let bytes = fs::read(&selected).map_err(|_| {
+            Error::new(
+                ErrorKind::DeclarationChanged,
+                "target source is unavailable",
+            )
+        })?;
+        if <[u8; 32]>::from(Sha256::digest(bytes)) != target.anchor.digest {
             return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "Dune has not selected the declaration source",
+                ErrorKind::DeclarationChanged,
+                "target source changed while proof was open",
             ));
         }
         Ok(())
     }
 
-    pub(crate) fn pet_error(&self, error: pet::PetError) -> Error {
-        let message = error.to_string();
-        match error {
-            pet::PetError::Timeout | pet::PetError::OperationTimeout => {
-                Error::new(ErrorKind::ProofTimeout, message)
-            }
-            pet::PetError::InvalidDeclaration(_) => {
-                Error::new(ErrorKind::InvalidDeclaration, message)
-            }
-            pet::PetError::UnsafeProofCommand(_) => Error::new(ErrorKind::InvalidRequest, message),
-            pet::PetError::Remote { .. } => Error::new(ErrorKind::ProofStepFailed, message),
-            pet::PetError::Stale | pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => {
-                Error::new(ErrorKind::InvalidConfiguration, message)
-            }
-            pet::PetError::Invalid(ref detail)
-                if detail.contains("interface changed")
-                    || detail.contains("source changed")
-                    || detail.contains("disappeared") =>
-            {
-                Error::new(ErrorKind::DeclarationChanged, message)
-            }
-            pet::PetError::Invalid(ref detail)
-                if detail.contains("requested declaration module context does not exist") =>
-            {
-                Error::new(ErrorKind::InvalidDeclaration, message)
-            }
-            pet::PetError::Invalid(_) => Error::new(ErrorKind::InvalidConfiguration, message),
-            pet::PetError::Environment(_) => Error::new(ErrorKind::InvalidConfiguration, message),
-            // A process failure reaches this boundary only after the runtime's
-            // fresh-process replay has failed. It is an operation failure, not
-            // a new public catch-all class.
-            pet::PetError::ProcessFailure(_) => Error::new(ErrorKind::ProofTimeout, message),
-        }
-    }
-    pub(crate) fn state_from_pet(
+    fn open_target(
         &self,
-        attempt: AttemptId,
-        root: &DeclarationSource,
-        native: &pet::PetState,
-        lifecycle: ProofLifecycle,
-    ) -> ProofState {
-        let goals = &native.goals;
-        let info = DeclarationInfo {
-            identity: root.info.identity.clone(),
-            kind: root.info.kind,
-            statement: root.info.statement.clone(),
-        };
-        let text = render_pet_goals(goals);
-        ProofState {
-            attempt: Some(attempt),
-            theorem: info,
-            lifecycle,
-            focused_goals: goals.focused.len(),
-            unfocused_goals: goals.unfocused.len(),
-            shelved_goals: goals.shelved.len(),
-            given_up_goals: goals.given_up.len(),
-            goals: text,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: DeclarationTarget,
+    ) -> Result<OpenedProof> {
+        let workspace = project.pet_workspace(&target.anchor.source)?;
+        let opened = actor
+            .state_at(&workspace, &target.anchor.source, target.anchor.header.end)
+            .map_err(declaration_pet_error)?;
+        if let Err(error) = require_open_proof(&opened) {
+            actor
+                .release_states(&[opened.state])
+                .map_err(declaration_pet_error)?;
+            return Err(error);
         }
+        Ok(OpenedProof {
+            state: opened.state,
+            view: proof_state(target.info.clone(), &opened.goals),
+            finished: opened.proof_finished,
+            target,
+        })
     }
 
-    pub(crate) fn owned_path(&self, root: &Path) -> Vec<PathBuf> {
-        let state = self.config.state_parent.as_path();
-        if state.starts_with(root) && state != root {
-            vec![state.to_owned()]
-        } else {
-            Vec::new()
+    fn declarations(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        file: &FileId,
+    ) -> Result<Vec<ResolvedDeclaration>> {
+        let source = project.source(file)?;
+        let workspace = project.pet_workspace(&source)?;
+        let rows = actor
+            .document_declarations(&workspace, &source)
+            .map_err(declaration_pet_error)?;
+        let bytes = fs::read(&source).map_err(|_| {
+            Error::new(
+                ErrorKind::DeclarationChanged,
+                "declaration source is unavailable",
+            )
+        })?;
+        let digest = Sha256::digest(&bytes).into();
+        let library = project.library(&source)?;
+        for row in &rows {
+            if row.qualified_path.is_empty()
+                || row.range.start >= row.range.end
+                || row.declaration_range.start != row.range.start
+                || row.range.end > row.declaration_range.end
+                || row.declaration_range.end > bytes.len()
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidConfiguration,
+                    "PET returned invalid declaration metadata",
+                ));
+            }
         }
+        let replaceable = replaceable_declaration_ranges(&rows);
+        let mut identities = BTreeSet::new();
+        rows.into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                if !row.qualified_path.starts_with(&library.0)
+                    || row.qualified_path.len() <= library.0.len()
+                {
+                    return Err(Error::new(
+                        ErrorKind::InvalidConfiguration,
+                        format!(
+                            "PET declaration path '{}' disagrees with Dune compilation unit '{}'",
+                            row.qualified_path.join("."),
+                            library.0.join("."),
+                        ),
+                    ));
+                }
+                let identity = DeclarationIdentity {
+                    file: file.clone(),
+                    qualified_path: row.qualified_path,
+                };
+                if !identities.insert(identity.clone()) {
+                    return Err(Error::new(
+                        ErrorKind::Ambiguous,
+                        "PET declaration identity is ambiguous",
+                    ));
+                }
+                let kind = declaration_kind(&row.kind);
+                let target = kind.map(|kind| DeclarationTarget {
+                    info: DeclarationInfo {
+                        identity: identity.clone(),
+                        kind,
+                        statement: row.statement,
+                    },
+                    library: library.clone(),
+                    anchor: SourceAnchor {
+                        source: source.clone(),
+                        digest,
+                        header: PetRange {
+                            start: row.range.start,
+                            end: row.range.end,
+                        },
+                        declaration: PetRange {
+                            start: row.declaration_range.start,
+                            end: row.declaration_range.end,
+                        },
+                        replaceable: replaceable[index],
+                    },
+                    new_header: None,
+                });
+                Ok(ResolvedDeclaration {
+                    identity,
+                    target,
+                    proof_finished: row.proof_finished,
+                    explicit_axiom: row.kind == "Axiom",
+                })
+            })
+            .collect()
+    }
+
+    fn resolve(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        identity: &DeclarationIdentity,
+    ) -> Result<ResolvedDeclaration> {
+        self.declarations(project, actor, &identity.file)?
+            .into_iter()
+            .find(|candidate| &candidate.identity == identity)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "declaration was not returned by PET"))
+    }
+
+    fn audit_target(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+    ) -> Result<()> {
+        let workspace = project.pet_workspace(&target.anchor.source)?;
+        let bytes = fs::read(&target.anchor.source).map_err(|_| {
+            Error::new(ErrorKind::DeclarationChanged, "audit source is unavailable")
+        })?;
+        let context = actor
+            .state_at(&workspace, &target.anchor.source, bytes.len())
+            .map_err(query_pet_error)?;
+        let result = self.audit_state(project, actor, target, context.state);
+        let released = actor
+            .release_states(&[context.state])
+            .map_err(query_pet_error);
+        result.and(released)
+    }
+
+    fn audit_state(
+        &self,
+        project: &DuneProject,
+        actor: &pet::PetActor,
+        target: &DeclarationTarget,
+        state: pet::PetStateId,
+    ) -> Result<()> {
+        let report = actor
+            .query(
+                state,
+                &PetQuery::Assumptions(target.info.identity.qualified_name()),
+            )
+            .map_err(query_pet_error)?;
+        let assumptions = parse_assumptions(&report)?;
+        for printed in assumptions {
+            let located = actor
+                .query(state, &PetQuery::Locate(printed.clone()))
+                .map_err(query_pet_error)?;
+            let canonical = locate_constant(&located).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidConfiguration,
+                    "PET Locate returned no unique constant",
+                )
+            })?;
+            let source = project.source_for_constant(&canonical).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::AxiomDependencyOutOfScope,
+                    format!("axiom dependency is outside the Dune project: {canonical}"),
+                )
+            })?;
+            let file = FileId::from_path(&project.root, &source)
+                .map_err(|message| Error::new(ErrorKind::InvalidConfiguration, message))?;
+            let declaration = self
+                .declarations(project, actor, &file)?
+                .into_iter()
+                .find(|candidate| candidate.identity.qualified_name() == canonical)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::AxiomDependencyOutOfScope,
+                        format!("PET could not classify axiom dependency: {canonical}"),
+                    )
+                })?;
+            if !declaration.explicit_axiom {
+                return Err(Error::new(
+                    ErrorKind::UnfinishedDependency,
+                    format!("proof depends on unfinished declaration '{canonical}'"),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
-/// Test-only barrier between source anchoring and PET document construction.
-/// The external E2E fixture mutates its disposable source after receiving the
-/// byte and acknowledges completion before replay resumes. Normal builds do
-/// not contain this branch or expose any test command to MCP users.
-#[cfg(all(feature = "fault-injection", unix))]
-fn declare_race_barrier() -> Result<()> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-    let Ok(socket) = std::env::var("ROCQ_ENGINE_DECLARE_RACE_SOCKET") else {
-        return Ok(());
-    };
-    let mut stream = UnixStream::connect(socket).map_err(|_| {
-        Error::new(
-            ErrorKind::InvalidConfiguration,
-            "declare race fixture unavailable",
-        )
-    })?;
-    let timeout = Some(Duration::from_secs(5));
-    stream.set_read_timeout(timeout).map_err(|_| {
-        Error::new(
-            ErrorKind::InvalidConfiguration,
-            "declare race fixture unavailable",
-        )
-    })?;
-    stream.set_write_timeout(timeout).map_err(|_| {
-        Error::new(
-            ErrorKind::InvalidConfiguration,
-            "declare race fixture unavailable",
-        )
-    })?;
-    stream.write_all(&[1]).map_err(|_| {
-        Error::new(
-            ErrorKind::InvalidConfiguration,
-            "declare race fixture unavailable",
-        )
-    })?;
-    let mut acknowledged = [0u8; 1];
-    stream.read_exact(&mut acknowledged).map_err(|_| {
-        Error::new(
-            ErrorKind::InvalidConfiguration,
-            "declare race fixture unavailable",
-        )
-    })?;
-    if acknowledged != [1] {
+struct ResolvedDeclaration {
+    identity: DeclarationIdentity,
+    target: Option<DeclarationTarget>,
+    proof_finished: bool,
+    explicit_axiom: bool,
+}
+
+/// Classify PET ranges structurally without interpreting Rocq source. A range
+/// can be replaced only when no other declaration record intersects it.
+fn replaceable_declaration_ranges(rows: &[pet::PetDeclaration]) -> Vec<bool> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            !rows.iter().enumerate().any(|(other_index, other)| {
+                index != other_index
+                    && row.declaration_range.start < other.declaration_range.end
+                    && other.declaration_range.start < row.declaration_range.end
+            })
+        })
+        .collect()
+}
+
+/// Validate the non-semantic shape of a public declaration ID. PET remains the
+/// authority for whether its components are valid Rocq identifiers.
+pub fn validate_identity(identity: &DeclarationIdentity) -> Result<()> {
+    validate_file_id(&identity.file)?;
+    if identity.qualified_path.is_empty()
+        || identity.qualified_path.iter().any(|part| part.is_empty())
+    {
         return Err(Error::new(
-            ErrorKind::InvalidConfiguration,
-            "declare race fixture unavailable",
+            ErrorKind::InvalidDeclaration,
+            "declaration path is empty",
         ));
     }
     Ok(())
 }
 
-/// Render only PET's structured semantic fields; this is presentation, never
-/// goal inference or console-output parsing.
-fn render_pet_goals(goals: &pet::PetGoals) -> String {
-    let mut output = String::new();
-    for (label, collection) in [
-        ("focused", &goals.focused),
-        ("unfocused", &goals.unfocused),
-        ("shelved", &goals.shelved),
-        ("given_up", &goals.given_up),
-    ] {
-        output.push_str(label);
-        output.push_str(":\n");
-        for goal in collection {
-            for hypothesis in &goal.hypotheses {
-                output.push_str("  ");
-                output.push_str(&hypothesis.names.join(" "));
-                if let Some(definition) = &hypothesis.definition {
-                    output.push_str(" := ");
-                    output.push_str(definition);
-                }
-                output.push_str(" : ");
-                output.push_str(&hypothesis.ty);
-                output.push('\n');
-            }
-            output.push_str("  ============================\n  ");
-            output.push_str(&goal.ty);
-            output.push('\n');
-        }
+fn validate_file_id(file: &FileId) -> Result<()> {
+    let path = Path::new(&file.0);
+    if file.0.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidRequest,
+            "file must be a safe project-relative path",
+        ));
     }
-    output
+    Ok(())
 }
 
-fn state(
-    attempt: Option<AttemptId>,
-    theorem: DeclarationInfo,
-    lifecycle: ProofLifecycle,
-) -> ProofState {
+fn relative_path<'a>(
+    identity: &'a DeclarationIdentity,
+    library: &LogicalLibrary,
+) -> Result<&'a [String]> {
+    if !identity.qualified_path.starts_with(&library.0)
+        || identity.qualified_path.len() <= library.0.len()
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidDeclaration,
+            "declaration path is outside its Dune logical library",
+        ));
+    }
+    Ok(&identity.qualified_path[library.0.len()..])
+}
+
+fn declaration_kind(value: &str) -> Option<DeclarationKind> {
+    match value {
+        "Theorem" => Some(DeclarationKind::Theorem),
+        "Lemma" => Some(DeclarationKind::Lemma),
+        "Fact" => Some(DeclarationKind::Fact),
+        "Remark" => Some(DeclarationKind::Remark),
+        "Corollary" => Some(DeclarationKind::Corollary),
+        "Proposition" => Some(DeclarationKind::Proposition),
+        "Definition" => Some(DeclarationKind::Definition),
+        _ => None,
+    }
+}
+
+fn validate_fragment(fragment: &str) -> Result<()> {
+    if fragment.trim().is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidRequest,
+            "proof fragment is empty",
+        ));
+    }
+    if fragment.len() > 1024 * 1024 {
+        return Err(Error::new(
+            ErrorKind::InvalidRequest,
+            "proof fragment exceeds 1 MiB",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_fragments(fragments: &[String]) -> Result<()> {
+    if fragments.is_empty() || fragments.len() > 20 {
+        return Err(Error::new(
+            ErrorKind::InvalidRequest,
+            "attempts must contain 1 to 20 fragments",
+        ));
+    }
+    for fragment in fragments {
+        validate_fragment(fragment)?;
+    }
+    Ok(())
+}
+
+fn require_open_proof(execution: &pet::PetExecution) -> Result<()> {
+    if !execution.goals.proof_mode || !execution.goals.given_up.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidDeclaration,
+            "PET did not open a safe proof state",
+        ));
+    }
+    Ok(())
+}
+
+fn proof_state(info: DeclarationInfo, goals: &pet::PetGoals) -> ProofState {
     ProofState {
-        attempt,
-        theorem,
-        lifecycle,
+        theorem: info,
+        lifecycle: ProofLifecycle::Open,
+        focused_goals: goals.focused.len(),
+        unfocused_goals: goals.unfocused.len(),
+        shelved_goals: goals.shelved.len(),
+        given_up_goals: goals.given_up.len(),
+        goals: render_goals(goals),
+    }
+}
+
+/// Return an operation result only after its temporary PET state has been
+/// released. A release/transport failure takes precedence because every other
+/// state in that process must then be invalidated by the MCP coordinator.
+fn release_after<T>(actor: &pet::PetActor, state: pet::PetStateId, result: Result<T>) -> Result<T> {
+    let released = actor
+        .release_states(&[state])
+        .map_err(declaration_pet_error);
+    match (result, released) {
+        (_, Err(error)) => Err(error),
+        (result, Ok(())) => result,
+    }
+}
+
+fn completed_state(info: DeclarationInfo) -> ProofState {
+    ProofState {
+        theorem: info,
+        lifecycle: ProofLifecycle::Completed,
         focused_goals: 0,
         unfocused_goals: 0,
         shelved_goals: 0,
@@ -925,728 +944,164 @@ fn state(
     }
 }
 
-/// Validate the syntactic components of a declaration identity before any
-/// Dune placement or PET operation.  MCP uses this same engine-owned contract
-/// to distinguish malformed names from valid names in the wrong compilation
-/// unit; no transport layer reimplements identifier rules.
-pub fn validate_identity(identity: &DeclarationIdentity) -> Result<()> {
-    let relative_file = std::path::Path::new(&identity.file.0);
-    if identity.file.0.is_empty()
-        || relative_file.is_absolute()
-        || relative_file
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-        || identity.qualified_path.is_empty()
-        || !identity
-            .qualified_path
-            .iter()
-            .all(|part| valid_identifier(part))
-    {
-        return Err(Error::new(
-            ErrorKind::InvalidDeclaration,
-            "declaration identity is invalid",
-        ));
+fn render_goals(goals: &pet::PetGoals) -> String {
+    let mut rendered = Vec::new();
+    for (index, goal) in goals.focused.iter().enumerate() {
+        let mut lines = Vec::new();
+        if let Some(name) = &goal.name {
+            lines.push(format!("goal {} ({name})", index + 1));
+        }
+        for hypothesis in &goal.hypotheses {
+            let names = hypothesis.names.join(" ");
+            match &hypothesis.definition {
+                Some(value) => lines.push(format!("{names} := {value} : {}", hypothesis.ty)),
+                None => lines.push(format!("{names} : {}", hypothesis.ty)),
+            }
+        }
+        lines.push("============================".into());
+        lines.push(goal.ty.clone());
+        rendered.push(lines.join("\n"));
     }
-    Ok(())
+    rendered.join("\n\n")
 }
 
-pub(crate) fn trace_error(error: trace_forest::Error) -> Error {
-    match error {
-        trace_forest::Error::UnknownCursor
-        | trace_forest::Error::Retired
-        | trace_forest::Error::PayloadCodec
-        | trace_forest::Error::CorruptSpill => {
-            Error::new(ErrorKind::NotFound, "proof attempt is no longer open")
-        }
-        trace_forest::Error::Closing | trace_forest::Error::ConcurrentPreparationFailed => {
-            Error::new(
-                ErrorKind::ProofTimeout,
-                "proof transition did not settle in time",
-            )
-        }
-        trace_forest::Error::PrefixOutOfRange => Error::new(
-            ErrorKind::InvalidRequest,
-            "trace prefix is outside the selected proof branch",
-        ),
-        trace_forest::Error::InvalidKey | trace_forest::Error::SpillUnavailable => Error::new(
+fn parse_assumptions(report: &str) -> Result<Vec<String>> {
+    if report.contains("Closed under the global context") {
+        return Ok(Vec::new());
+    }
+    let names = report
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (name, _) = line.split_once(" : ")?;
+            (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        Err(Error::new(
             ErrorKind::InvalidConfiguration,
-            "trace state storage is unavailable",
-        ),
-    }
-}
-
-fn trace_call_error(error: trace_forest::CallError<Error>) -> Error {
-    match error {
-        trace_forest::CallError::Callback(error) => error,
-        trace_forest::CallError::Forest(error) => trace_error(error),
-    }
-}
-
-fn validate_new_declaration(identity: &DeclarationIdentity, statement: &str) -> Result<()> {
-    validate_identity(identity)?;
-    if statement.trim().is_empty() || statement.len() > 1024 * 1024 {
-        return Err(Error::new(
-            ErrorKind::InvalidDeclaration,
-            "declaration statement is empty or oversized",
-        ));
-    }
-    // Design note: statement parsing and identity validation belong to PET.
-    // This boundary only bounds the user payload; PET immediately parses the
-    // constructed declaration when the trace root is opened.
-    Ok(())
-}
-
-fn new_declaration_header(
-    kind: DeclarationKind,
-    identity: &DeclarationIdentity,
-    statement: &str,
-) -> Result<String> {
-    // Design note: preserve the user's Rocq syntax byte-for-byte inside the
-    // sentence; collapsing whitespace would also rewrite string literals.
-    let body = statement.trim();
-    if body.is_empty() {
-        return Err(Error::new(
-            ErrorKind::InvalidDeclaration,
-            "declaration statement is empty",
-        ));
-    }
-    let keyword = declaration_kind_keyword(kind);
-    let prefix = format!(
-        "{keyword} {}",
-        identity.constant().ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidDeclaration,
-                "declaration has no leaf name",
-            )
-        })?
-    );
-    if body
-        .split_whitespace()
-        .next()
-        .is_some_and(|word| word.eq_ignore_ascii_case(keyword))
-    {
-        Ok(body.trim_end_matches('.').trim().to_owned())
+            "PET assumption result is unrecognized",
+        ))
     } else {
-        Ok(format!("{prefix} : {body}"))
+        Ok(names)
     }
 }
 
-fn declaration_kind_keyword(kind: DeclarationKind) -> &'static str {
-    match kind {
-        DeclarationKind::Theorem => "Theorem",
-        DeclarationKind::Lemma => "Lemma",
-        DeclarationKind::Fact => "Fact",
-        DeclarationKind::Remark => "Remark",
-        DeclarationKind::Corollary => "Corollary",
-        DeclarationKind::Proposition => "Proposition",
-        DeclarationKind::Definition => "Definition",
-    }
+fn locate_constant(report: &str) -> Option<String> {
+    report.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Constant ")?
+            .split_whitespace()
+            .next()
+            .map(str::to_owned)
+    })
 }
 
-fn root_key(declaration: &DeclarationSource) -> Result<RootKey> {
-    let mut digest = Sha256::new();
-    let file = declaration.info.identity.file.0.as_bytes();
-    // Design note: FileId is part of DeclarationId even when Dune currently
-    // makes the qualified name globally unique. Omitting it aliases distinct
-    // declaration identities whenever their path and source digest coincide.
-    digest.update((file.len() as u64).to_le_bytes());
-    digest.update(file);
-    for part in &declaration.info.identity.qualified_path {
-        digest.update((part.len() as u64).to_le_bytes());
-        digest.update(part.as_bytes());
-    }
-    // A source edit creates a new immutable trace root. Reusing an identity-
-    // only root would resurrect stale PET anchors after an explicit reopen.
-    digest.update(declaration.anchor.digest);
-    Ok(RootKey::from_digest(digest.finalize().into()))
+fn declaration_pet_error(error: pet::PetError) -> Error {
+    let kind = match &error {
+        error if error.lost() => ErrorKind::ProofTimeout,
+        pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
+        pet::PetError::Invalid(_) | pet::PetError::Remote { .. } => ErrorKind::InvalidDeclaration,
+        pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::ProofTimeout,
+        pet::PetError::ProcessLost(_) => ErrorKind::ProofTimeout,
+    };
+    Error::new(kind, error.to_string())
 }
 
-pub(crate) fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64 * 1024
-        && value
-            .chars()
-            .all(|x| x == '_' || x == '\'' || x.is_alphanumeric())
+fn step_pet_error(error: pet::PetError) -> Error {
+    let kind = match &error {
+        error if error.lost() => ErrorKind::ProofTimeout,
+        pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
+        pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
+        pet::PetError::Remote { .. } => ErrorKind::ProofStepFailed,
+        pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::ProofTimeout,
+        pet::PetError::ProcessLost(_) => ErrorKind::ProofTimeout,
+    };
+    Error::new(kind, error.to_string())
 }
 
-pub(crate) fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.len() > 64 * 1024
-        || name.split('.').any(|part| !valid_identifier(part))
-    {
-        return Err(Error::new(
-            ErrorKind::InvalidRequest,
-            "query name is invalid",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_native_fragment(fragment: &str) -> Result<()> {
-    if fragment.trim().is_empty()
-        || fragment.len() > 1024 * 1024
-        || fragment.chars().any(char::is_control)
-    {
-        return Err(Error::new(
-            ErrorKind::InvalidRequest,
-            "query expression is invalid",
-        ));
-    }
-    Ok(())
-}
-
-// Solved-branch to synchronous writeback orchestration.
-impl Engine {
-    /// Publish a PET-completed branch while the trace-forest close callback
-    /// still owns the branch. A writeback failure leaves the attempt open and
-    /// returns the concrete failure to the caller; there is no pending or
-    /// recovered publication state.
-    pub(crate) fn close_solved(
-        &self,
-        attempt: AttemptId,
-        native: &pet::PetState,
-    ) -> Result<Option<(ProofState, Option<Error>)>> {
-        if !(native.proof_finished && native.goals.all_clear()) {
-            return Ok(None);
-        }
-        let project = self.attempt_project(attempt)?;
-        let traces = self.traces_for_project(&project)?;
-        let (project, project_gate) = self.project_access(&project)?;
-        let _gate = project_gate
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let selected = traces.inspect(attempt.0).map_err(trace_error)?;
-        let root = selected.root().clone();
-        let mut published = None;
-        let outcome = traces.close(attempt.0, |view| {
-            let state = writeback::publish(self, &project, view.root(), view.actions(), native)?;
-            published = Some(state);
-            Ok::<(), Error>(())
-        });
-        match outcome {
-            Ok(trace_forest::CloseOutcome::Closed)
-            | Ok(trace_forest::CloseOutcome::AlreadyRetired) => {}
-            Err(trace_forest::CallError::Callback(error)) => {
-                // The callback is transactional: on failure TraceForest keeps
-                // the branch live. A source-CAS failure is the exception to
-                // actionability: its immutable root no longer matches the
-                // project, so it must not escape as a selectable checkpoint.
-                let mut state = self.state_from_pet(attempt, &root, native, ProofLifecycle::Open);
-                if error.kind == ErrorKind::DeclarationChanged {
-                    state.attempt = None;
-                }
-                return Ok(Some((state, Some(error))));
-            }
-            Err(trace_forest::CallError::Forest(error)) => return Err(trace_error(error)),
-        }
-        let state = published.ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidConfiguration,
-                "writeback completed without a proof state",
-            )
-        })?;
-        if let Ok(project_state) = self.project_state(&project) {
-            let mut project_state = project_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(declaration) = project_state.touched.get_mut(&root.info.identity) {
-                declaration.attempts.clear();
-            }
-        }
-        self.pet.invalidate_states(&project);
-        Ok(Some((state, None)))
-    }
-}
-
-/// Split and bound every requested fragment before any PET state is touched.
-/// Rocq parsing and tactic validity remain PET responsibilities; this helper
-/// only establishes request framing and TraceForest key invariants.
-fn validated_attempts(attempts: &[String]) -> Result<Vec<Vec<CanonicalTactic>>> {
-    if !(1..=20).contains(&attempts.len()) {
-        return Err(Error::new(
-            ErrorKind::InvalidRequest,
-            "attempt count must be between 1 and 20",
-        ));
-    }
-    attempts
-        .iter()
-        .enumerate()
-        .map(|(index, text)| {
-            let ranges = pet::sentence_ranges(text).map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidRequest,
-                    format!("attempt {index} cannot be split into Rocq sentences"),
-                )
-            })?;
-            if ranges.is_empty() {
-                return Err(Error::new(
-                    ErrorKind::InvalidRequest,
-                    format!("attempt {index} is empty"),
-                ));
-            }
-            ranges
-                .into_iter()
-                .map(|range| {
-                    let tactic = pet::canonical_tactic(&text[range])?;
-                    ActionKey::new(tactic.0.as_bytes()).map_err(|_| {
-                        Error::new(ErrorKind::InvalidRequest, "proof sentence is too large")
-                    })?;
-                    Ok(tactic)
-                })
-                .collect()
-        })
-        .collect()
-}
-
-// Interactive trace/PET orchestration.
-impl Engine {
-    /// Evaluate ordered proof fragments from one immutable base and commit the
-    /// first fragment whose every sentence PET accepts.
-    ///
-    /// Inputs are validated before PET runs. Rejected fragments never append a
-    /// trace prefix, and a winning multi-sentence fragment is selected only
-    /// after its final sentence succeeds. The already evaluated PET state is
-    /// retained for the new cursor; the winner is never replayed merely to
-    /// commit it. A solved winner is synchronously passed to writeback.
-    pub fn check(&self, attempt: AttemptId, attempts: &[String]) -> Result<CheckResult> {
-        let attempts = validated_attempts(attempts)?;
-        let project = self.attempt_project(attempt)?;
-        let traces = self.traces_for_project(&project)?;
-        let (project, project_gate) = self.project_access(&project)?;
-        let gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let view = traces.inspect(attempt.0).map_err(trace_error)?;
-        let base = self.pet_state_for_attempt(&project, attempt, view.root(), view.actions())?;
-        let mut rejected = Vec::new();
-        let mut winner = None;
-        for (index, tactics) in attempts.iter().enumerate() {
-            match self.evaluate_attempt(&project, view.root(), view.actions(), &base, tactics) {
-                Ok(native) => {
-                    winner = Some((index, tactics, native));
-                    break;
-                }
-                Err(error) => rejected.push(error),
-            }
-        }
-
-        let Some((selected, tactics, native)) = winner else {
-            return Ok(CheckResult {
-                selected: None,
-                state: self.state_from_pet(attempt, view.root(), &base, ProofLifecycle::Open),
-                rejected,
-                error: None,
-            });
-        };
-
-        // Design note: PET acceptance precedes topology publication, so no
-        // rejected fragment (including an accepted prefix followed by a
-        // rejected sentence) becomes a TraceForest branch.
-        let mut cursor = attempt.0;
-        for tactic in tactics {
-            let key = ActionKey::new(tactic.0.as_bytes())
-                .expect("validated_attempts already bounded every action key");
-            cursor = traces
-                .step(cursor, key, || Ok::<_, Error>(tactic.clone()))
-                .map_err(trace_call_error)?;
-        }
-        let mut committed_actions = view.actions().to_vec();
-        committed_actions.extend(tactics.iter().cloned());
-        self.pet.retain_state(&project, &native, &committed_actions);
-        self.remember_attempt(cursor, &project);
-        self.remember_pet_state(
-            AttemptId(cursor),
-            &native,
-            view.actions().len() + tactics.len(),
-        );
-        let mut state = self.state_from_pet(
-            AttemptId(cursor),
-            view.root(),
-            &native,
-            ProofLifecycle::Open,
-        );
-        drop(gate);
-        let mut close_error = None;
-        match self.close_solved(AttemptId(cursor), &native) {
-            Ok(Some((published, error))) => {
-                state = published;
-                close_error = error;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                // Design note: an outer NotFound means the trace was retired
-                // before close acquired it (for example, a concurrent close
-                // won). Never expose an AttemptId/checkpoint that is already
-                // unusable. Callback failures take the Ok(Some(...)) path and
-                // retain their live attempt instead.
-                if matches!(
-                    error.kind,
-                    ErrorKind::NotFound | ErrorKind::DeclarationChanged
-                ) {
-                    state.attempt = None;
-                }
-                close_error = Some(error);
-            }
-        }
-
-        Ok(CheckResult {
-            selected: Some(selected),
-            state,
-            rejected,
-            error: close_error,
-        })
-    }
-
-    /// Evaluate every proof fragment from the same PET base without appending
-    /// trace edges, selecting a cursor, publishing source, or closing a proof.
-    pub fn try_attempts(
-        &self,
-        attempt: AttemptId,
-        attempts: &[String],
-    ) -> Result<Vec<AttemptResult>> {
-        let attempts = validated_attempts(attempts)?;
-        let project = self.attempt_project(attempt)?;
-        let traces = self.traces_for_project(&project)?;
-        let (project, project_gate) = self.project_access(&project)?;
-        let _gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let view = traces.inspect(attempt.0).map_err(trace_error)?;
-        let base = self.pet_state_for_attempt(&project, attempt, view.root(), view.actions())?;
-        let mut out = Vec::with_capacity(attempts.len());
-        for tactics in &attempts {
-            match self.evaluate_attempt(&project, view.root(), view.actions(), &base, tactics) {
-                Ok(native) => {
-                    let mut state =
-                        self.state_from_pet(attempt, view.root(), &native, ProofLifecycle::Open);
-                    // Design note: hypothetical goals do not correspond to a
-                    // committed TraceForest cursor. Do not attach the shared
-                    // base AttemptId to a state that cannot be selected.
-                    state.attempt = None;
-                    out.push(AttemptResult {
-                        solved: native.proof_finished && native.goals.all_clear(),
-                        state: Some(state),
-                        error: None,
-                    });
-                }
-                Err(error) => out.push(AttemptResult {
-                    solved: false,
-                    state: None,
-                    error: Some(error),
-                }),
-            }
-        }
-        Ok(out)
-    }
-
-    /// Run one already validated fragment on a persistent PET branch.
-    ///
-    /// `base_actions` is the replay prefix for `base`. Each later recovery
-    /// receives that prefix plus only the sentences accepted earlier in this
-    /// fragment. No engine or TraceForest state is changed.
-    fn evaluate_attempt(
-        &self,
-        project: &Path,
-        root: &DeclarationSource,
-        base_actions: &[CanonicalTactic],
-        base: &pet::PetState,
-        tactics: &[CanonicalTactic],
-    ) -> Result<pet::PetState> {
-        let mut state = base.clone();
-        let mut replay = base_actions.to_vec();
-        for tactic in tactics {
-            let next = self
-                .pet
-                .fork_state(project, root, &state, &replay, tactic)
-                .map_err(|error| self.pet_error(error))?;
-            replay.push(tactic.clone());
-            state = next;
-        }
-        Ok(state)
-    }
-
-    /// Returns PET's structured goals, replaying only if its live handle is gone.
-    pub fn inspect(&self, attempt: AttemptId) -> Result<ProofState> {
-        self.inspect_inner(attempt)
-    }
-
-    /// Restore an existing trace attempt without pruning the immutable forest.
-    ///
-    /// `current` and `target` must be live attempts rooted at the same source
-    /// declaration and snapshot. PET validates or replays `target` before its
-    /// state is returned. Request-boundary topology deliberately remains an
-    /// MCP concern; this engine operation accepts only opaque trace handles.
-    pub fn checkout(&self, current: AttemptId, target: AttemptId) -> Result<ProofState> {
-        let project = self.attempt_project(current)?;
-        let target_project = self.attempt_project(target)?;
-        if target_project != project {
-            return Err(Error::new(
-                ErrorKind::InvalidRequest,
-                "target proof attempt belongs to another project",
-            ));
-        }
-        let traces = self.traces_for_project(&project)?;
-        let (project, project_gate) = self.project_access(&project)?;
-        let gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let current_view = traces.inspect(current.0).map_err(trace_error)?;
-        let target_view = traces.inspect(target.0).map_err(trace_error)?;
-        if current_view.root() != target_view.root() {
-            return Err(Error::new(
-                ErrorKind::InvalidRequest,
-                "target proof attempt belongs to another proof",
-            ));
-        }
-        // Design note: PET's cached handle is only a fast path. This call
-        // transparently replays the immutable target trace after eviction.
-        // Selection changes only in the MCP layer after checkout succeeds.
-        let native = self.pet_state_for_attempt(
-            &project,
-            target,
-            target_view.root(),
-            target_view.actions(),
-        )?;
-        let state = self.state_from_pet(target, target_view.root(), &native, ProofLifecycle::Open);
-        drop(gate);
-        Ok(state)
-    }
-
-    fn inspect_inner(&self, attempt: AttemptId) -> Result<ProofState> {
-        let project = self.attempt_project(attempt)?;
-        let traces = self.traces_for_project(&project)?;
-        let (project, project_gate) = self.project_access(&project)?;
-        let _gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let view = traces.inspect(attempt.0).map_err(trace_error)?;
-        let native = self.pet_state_for_attempt(&project, attempt, view.root(), view.actions())?;
-        Ok(self.state_from_pet(attempt, view.root(), &native, ProofLifecycle::Open))
-    }
-}
-
-// Read-only PET query operations. MCP owns request dispatch; the engine exposes
-// only concrete operations rather than retaining a second request DTO layer.
-impl Engine {
-    /// Returns PET's current goal state for an attempt owned by `project`.
-    pub fn query_goals(&self, project: &Path, attempt: AttemptId) -> Result<ProofState> {
-        let actual = self.attempt_project(attempt)?;
-        let requested = self
-            .project_state(project)?
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .root
-            .clone();
-        if requested != actual {
-            return Err(Error::new(
-                ErrorKind::DeclarationChanged,
-                "query project does not match attempt",
-            ));
-        }
-        self.inspect(attempt)
-    }
-
-    /// Runs Rocq `Search` in an attempt or at an explicitly named declaration.
-    pub fn query_search(
-        &self,
-        project: &Path,
-        context: Option<AttemptId>,
-        pattern: String,
-        at: Option<&DeclarationIdentity>,
-    ) -> Result<String> {
-        validate_native_fragment(&pattern)?;
-        self.query_in_context(project, context, at, pet::FixedPetQuery::Search(pattern))
-    }
-
-    /// Returns PET/Rocq `About` output for an exact declaration identity.
-    pub fn query_statement(&self, project: &Path, id: &DeclarationIdentity) -> Result<String> {
-        self.query_declaration(project, id, pet::FixedPetQuery::About)
-    }
-
-    /// Returns PET/Rocq `Print` output for an exact declaration identity.
-    pub fn query_proof(&self, project: &Path, id: &DeclarationIdentity) -> Result<String> {
-        self.query_declaration(project, id, pet::FixedPetQuery::Print)
-    }
-
-    /// Returns PET/Rocq `Print` output for an exact definition identity.
-    pub fn query_definition(&self, project: &Path, id: &DeclarationIdentity) -> Result<String> {
-        self.query_declaration(project, id, pet::FixedPetQuery::Print)
-    }
-
-    /// Returns PET/Rocq `Print Assumptions` output for a declaration.
-    pub fn query_assumptions(&self, project: &Path, id: &DeclarationIdentity) -> Result<String> {
-        self.query_declaration(project, id, pet::FixedPetQuery::Assumptions)
-    }
-
-    /// Returns PET/Rocq dependency output for a declaration.
-    pub fn query_dependencies(&self, project: &Path, id: &DeclarationIdentity) -> Result<String> {
-        self.query_declaration(project, id, pet::FixedPetQuery::Dependencies)
-    }
-
-    /// Asks PET to type an expression in an attempt or named source context.
-    pub fn query_expression_type(
-        &self,
-        project: &Path,
-        context: Option<AttemptId>,
-        expression: String,
-        at: Option<&DeclarationIdentity>,
-    ) -> Result<String> {
-        validate_native_fragment(&expression)?;
-        self.query_in_context(
-            project,
-            context,
-            at,
-            pet::FixedPetQuery::ExpressionType(expression),
-        )
-    }
-
-    /// Asks PET to interpret notation in an attempt or named source context.
-    pub fn query_notation(
-        &self,
-        project: &Path,
-        context: Option<AttemptId>,
-        expression: String,
-        at: Option<&DeclarationIdentity>,
-    ) -> Result<String> {
-        validate_native_fragment(&expression)?;
-        self.query_in_context(
-            project,
-            context,
-            at,
-            pet::FixedPetQuery::Notation(expression),
-        )
-    }
-
-    fn query_declaration(
-        &self,
-        project: &Path,
-        identity: &DeclarationIdentity,
-        make_query: impl FnOnce(String) -> pet::FixedPetQuery,
-    ) -> Result<String> {
-        let project = self.load_declaration(project, identity)?;
-        let (_, project_gate) = self.project_access(&project)?;
-        let _gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source = self.source_for_identity(&project, identity)?;
-        self.query_text(
-            &project,
-            None,
-            Some(&source),
-            make_query(identity.constant().unwrap_or_default().to_owned()),
-        )
-    }
-
-    fn query_in_context(
-        &self,
-        project: &Path,
-        context: Option<AttemptId>,
-        at: Option<&DeclarationIdentity>,
-        query: pet::FixedPetQuery,
-    ) -> Result<String> {
-        if context.is_some() && at.is_some() {
-            return Err(Error::new(
-                ErrorKind::InvalidRequest,
-                "query cannot combine the selected proof with an explicit declaration context",
-            ));
-        }
-        let (project, project_gate) = self.project_access(project)?;
-        let _gate = project_gate
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let source = self.query_context_source(&project, at)?;
-        self.query_text(&project, context, source.as_ref(), query)
-    }
-
-    /// Run a fixed PET query in either the selected interactive state or the
-    /// original checked source document. No synthetic theorem is constructed.
-    fn query_text(
-        &self,
-        project: &Path,
-        context: Option<AttemptId>,
-        target_source: Option<&DeclarationSource>,
-        query: pet::FixedPetQuery,
-    ) -> Result<String> {
-        if let Some(attempt) = context {
-            let actual = self.attempt_project(attempt)?;
-            let requested = self
-                .project_state(project)?
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .root
-                .clone();
-            if requested != actual {
-                return Err(Error::new(
-                    ErrorKind::DeclarationChanged,
-                    "query project does not match attempt",
-                ));
-            }
-            let view = self
-                .traces_for_attempt(attempt)?
-                .inspect(attempt.0)
-                .map_err(trace_error)?;
-            let state =
-                self.pet_state_for_attempt(project, attempt, view.root(), view.actions())?;
-            let (text, state) = self
-                .pet
-                .run_fixed(project, view.root(), &state, view.actions(), query)
-                .map_err(|error| self.pet_error(error))?;
-            self.remember_pet_state(attempt, &state, view.actions().len());
-            return Ok(text);
-        }
-
-        let source = target_source.ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidRequest,
-                "query requires a selected proof or an explicit 'at' declaration",
-            )
-        })?;
-        self.pet
-            .query_after_declaration(project, source, query)
-            .map_err(|error| self.pet_error(error))
-    }
-
-    fn query_context_source(
-        &self,
-        project: &Path,
-        at: Option<&DeclarationIdentity>,
-    ) -> Result<Option<DeclarationSource>> {
-        at.map(|identity| {
-            let project = self.load_declaration(project, identity)?;
-            self.source_for_identity(&project, identity)
-        })
-        .transpose()
-    }
+fn query_pet_error(error: pet::PetError) -> Error {
+    let kind = match &error {
+        error if error.lost() => ErrorKind::ProofTimeout,
+        pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
+        pet::PetError::Environment(_)
+        | pet::PetError::Remote { .. }
+        | pet::PetError::Protocol(_)
+        | pet::PetError::OutputOverflow
+        | pet::PetError::ProcessLost(_) => ErrorKind::InvalidConfiguration,
+    };
+    Error::new(kind, error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn declaration_source(file: &str) -> DeclarationSource {
-        DeclarationSource {
-            info: DeclarationInfo {
-                identity: DeclarationIdentity {
-                    file: FileId(file.to_owned()),
-                    qualified_path: vec!["Demo".into(), "Unit".into(), "same".into()],
-                },
-                kind: DeclarationKind::Theorem,
-                statement: "True".into(),
-            },
-            library: LogicalLibrary(vec!["Demo".into(), "Unit".into()]),
-            anchor: PetAnchor {
-                source: PathBuf::from(file),
-                digest: [7; 32],
-                header: PetRange { start: 0, end: 10 },
-                declaration: Some(PetRange { start: 0, end: 20 }),
-            },
+    fn declaration(name: &str, start: usize, end: usize) -> pet::PetDeclaration {
+        pet::PetDeclaration {
+            qualified_path: vec!["Demo".into(), name.into()],
+            kind: "Definition".into(),
+            range: pet::PetRange { start, end },
+            declaration_range: pet::PetRange { start, end },
+            proof_finished: true,
+            statement: format!("Definition {name} := 0"),
         }
     }
 
     #[test]
-    fn trace_root_key_contains_the_complete_declaration_identity() {
-        let left = declaration_source("left/Unit.v");
-        let right = declaration_source("right/Unit.v");
-        assert_ne!(root_key(&left).unwrap(), root_key(&right).unwrap());
+    fn overlapping_pet_ranges_are_not_individually_replaceable() {
+        let rows = [
+            declaration("first", 0, 20),
+            declaration("second", 0, 20),
+            declaration("third", 20, 30),
+            declaration("fourth", 25, 40),
+        ];
+        assert_eq!(
+            replaceable_declaration_ranges(&rows),
+            vec![false, false, false, false]
+        );
+        assert_eq!(
+            replaceable_declaration_ranges(&[declaration("only", 0, 20)]),
+            vec![true]
+        );
+    }
+
+    #[test]
+    fn pet_compound_command_is_discoverable_but_not_replaceable() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("dune-project"),
+            "(lang dune 3.22)\n(using rocq 0.12)\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+        fs::write(
+            directory.path().join("A.v"),
+            "Inductive even : nat -> Prop :=\n\
+             | even_O : even 0\n\
+             | even_S : forall n, odd n -> even (S n)\n\
+             with odd : nat -> Prop :=\n\
+             | odd_S : forall n, even n -> odd (S n).\n\n\
+             Theorem mutual_first : forall n, even n -> True\n\
+             with mutual_second : forall n, odd n -> True.\n\
+             Proof.\n\
+             - intros. exact I.\n\
+             - intros. exact I.\n\
+             Qed.\n",
+        )
+        .unwrap();
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let project = engine.attach(directory.path()).unwrap();
+        let actor = pet::PetActor::new();
+        let declarations = engine
+            .declarations(&project, &actor, &FileId("A.v".into()))
+            .unwrap();
+        assert_eq!(declarations.len(), 2);
+        assert!(declarations.iter().all(|declaration| {
+            declaration
+                .target
+                .as_ref()
+                .is_some_and(|target| !target.anchor.replaceable)
+        }));
     }
 }

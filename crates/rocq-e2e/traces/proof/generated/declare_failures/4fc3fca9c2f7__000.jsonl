@@ -1,8 +1,0 @@
-{"event":"server_start"}
-{"event":"user_connect","user":"alice"}
-{"event":"command","user":"alice","command":{"tool":"start","args":{"project_path":"matrix_dune_project"}},"expected":{"attached":true}}
-{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"truth","statement":"True","kind":"Theorem","library":"Matrix.Main","file":"theories/Main.v"}},"expected":{"kind":"invalid_declaration","message":"declaration identity is already present"}}
-{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"Missing.new_truth","statement":"True","kind":"Theorem","library":"Matrix.Main","file":"theories/Main.v"}},"expected":{"kind":"invalid_declaration","message":"declaration name must be local or qualified by its library and modules"}}
-{"event":"command","user":"alice","command":{"tool":"declare","args":{"name":"fresh","statement":"True","kind":"Theorem","library":"Missing.Main","file":"theories/Main.v"}},"expected":{"kind":"invalid_configuration","message":"logical library is not selected by Dune"}}
-{"event":"user_disconnect","user":"alice"}
-{"event":"server_kill"}

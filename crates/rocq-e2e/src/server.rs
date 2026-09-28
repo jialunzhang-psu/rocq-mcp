@@ -1,22 +1,16 @@
 use crate::{Result, TraceError};
-use std::{
-    collections::BTreeMap, ffi::OsString, net::TcpListener, path::PathBuf, process::Stdio,
-    time::Duration,
-};
+use std::{net::TcpListener, path::PathBuf, process::Stdio, time::Duration};
 use tokio::{
     net::TcpStream,
     process::{Child, Command},
     time::{Instant, sleep},
 };
 
-/// Configuration for the externally spawned server. The state directory is
-/// reused across `server_kill`/`server_start`, which makes restart traces real.
+/// Configuration for the externally spawned server.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     /// External rocq-mcp binary under test.
     pub executable: PathBuf,
-    /// Durable engine state reused by every restart in the trace.
-    pub state_dir: PathBuf,
     /// Child working directory used to resolve relative project paths.
     pub working_dir: PathBuf,
     /// Maximum time allowed for the HTTP listener to become reachable.
@@ -26,39 +20,27 @@ pub struct ServerConfig {
     /// Optional fixture watchdog for one tool call.
     ///
     /// Normal calls have no harness deadline: a valid Dune build can take an
-    /// arbitrary amount of time, and engine-owned PET/Dune safety boundaries
-    /// report their own typed failures. Fault fixtures set this explicitly so
-    /// an intentionally dead child cannot leave the replay hanging.
+    /// arbitrary amount of time. A caller may opt into an outer watchdog for
+    /// its own test environment.
     pub call_timeout: Option<Duration>,
-    environment: BTreeMap<OsString, OsString>,
 }
 
 impl ServerConfig {
-    pub fn new(executable: impl Into<PathBuf>, state_dir: impl Into<PathBuf>) -> Self {
+    pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
-            state_dir: state_dir.into(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            // Starting 64 isolated production processes is an intentional E2E
-            // load shape. The deadline diagnoses a stuck child, not scheduler
-            // latency while the host admits a full parallel batch.
+            // This bounds only process/listener setup; tool calls deliberately
+            // have no default harness deadline.
             startup_timeout: Duration::from_secs(60),
             transport_timeout: Duration::from_secs(60),
             call_timeout: None,
-            environment: BTreeMap::new(),
         }
     }
 
     /// Resolve relative project paths in trace commands from this directory.
     pub fn with_working_dir(mut self, working_dir: impl Into<PathBuf>) -> Self {
         self.working_dir = working_dir.into();
-        self
-    }
-
-    /// Add one child-process environment override. Black-box fault fixtures use
-    /// this without exposing test controls through the MCP interface.
-    pub fn with_env(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Self {
-        self.environment.insert(name.into(), value.into());
         self
     }
 
@@ -109,10 +91,6 @@ impl ServerController {
                 message: "server is already running".into(),
             });
         }
-        std::fs::create_dir_all(&self.config.state_dir).map_err(|source| TraceError::Io {
-            operation: "create server state directory",
-            source,
-        })?;
         let address = reserve_loopback_address().map_err(|source| TraceError::Io {
             operation: "reserve server address",
             source,
@@ -120,8 +98,6 @@ impl ServerController {
         let mut child = Command::new(&self.config.executable)
             .arg("--http")
             .arg(address.to_string())
-            .env("ROCQ_NEW_STATE_DIR", &self.config.state_dir)
-            .envs(&self.config.environment)
             .current_dir(&self.config.working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -241,8 +217,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normal_calls_have_no_harness_deadline_but_faults_can_opt_in() {
-        let config = ServerConfig::new("server", "state");
+    fn normal_calls_have_no_harness_deadline_but_callers_can_opt_in() {
+        let config = ServerConfig::new("server");
         assert_eq!(config.call_timeout, None);
         let config = config.with_call_timeout(Duration::from_secs(3));
         assert_eq!(config.call_timeout, Some(Duration::from_secs(3)));

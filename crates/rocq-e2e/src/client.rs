@@ -48,7 +48,7 @@ impl UserConnection {
         let call = self.service.call_tool(
             CallToolRequestParams::new(command.tool.clone()).with_arguments(command.args.clone()),
         );
-        // Design note: only explicit fault fixtures wrap a call in a harness
+        // Design note: only an explicit runner policy wraps a call in a
         // timeout. Applying a default here would silently restore the native
         // build deadline that the production engine deliberately omits.
         let result = match call_timeout {

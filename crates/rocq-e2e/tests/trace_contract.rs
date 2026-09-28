@@ -1,7 +1,7 @@
 //! Public-contract tests for trace syntax. Process crossings are exercised by
 //! the replay CLI against the external server binary, never by linking it.
-use rocq_e2e::{Event, parse_trace};
-use std::io::Cursor;
+use rocq_e2e::{Event, load_trace, parse_trace};
+use std::{collections::BTreeSet, io::Cursor, path::Path};
 
 #[test]
 fn five_event_jsonl_contract_is_public_and_ordered() {
@@ -38,13 +38,11 @@ fn command_is_exactly_the_user_command_expected_triple() {
 }
 
 #[test]
-fn fault_and_parallel_expectations_are_strict_trace_metadata() {
-    let valid = r#"{"event":"command","user":"alice","command":{"tool":"check","args":{"attempts":["exact I."]}},"expected":{"$transport":"lost"}}
-{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals"}},"expected":{"$one_of":[{"text":"a"},{"text":"b"}]},"parallel_group":"race"}
+fn parallel_expectations_are_strict_trace_metadata() {
+    let valid = r#"{"event":"command","user":"alice","command":{"tool":"query","args":{"kind":"goals"}},"expected":{"$one_of":[{"text":"a"},{"text":"b"}]},"parallel_group":"race"}
 "#;
-    assert_eq!(parse_trace(Cursor::new(valid)).unwrap().events.len(), 2);
+    assert_eq!(parse_trace(Cursor::new(valid)).unwrap().events.len(), 1);
     for invalid in [
-        r#"{"event":"command","user":"alice","command":{"tool":"check","args":{}},"expected":{"$transport":"lost","kind":"x"}}"#,
         r#"{"event":"command","user":"alice","command":{"tool":"query","args":{}},"expected":{"$one_of":[{"text":"a"}]}}"#,
         r#"{"event":"command","user":"alice","command":{"tool":"query","args":{}},"expected":{},"parallel_group":" "}"#,
     ] {
@@ -52,5 +50,45 @@ fn fault_and_parallel_expectations_are_strict_trace_metadata() {
             parse_trace(Cursor::new(invalid)).is_err(),
             "accepted {invalid}"
         );
+    }
+}
+
+#[test]
+fn checked_in_suite_covers_exactly_the_current_ten_tools() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let trace = load_trace(root.join("traces/current_protocol.jsonl")).unwrap();
+    let tools = trace
+        .events
+        .iter()
+        .filter_map(|located| match &located.event {
+            Event::Command { command, .. } => Some(command.tool.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        tools,
+        BTreeSet::from([
+            "abandon",
+            "check",
+            "declare",
+            "list_decls",
+            "list_files",
+            "prove",
+            "query",
+            "rewind",
+            "start",
+            "try",
+        ])
+    );
+    assert!(matches!(
+        trace.events.first().unwrap().event,
+        Event::ServerStart
+    ));
+    assert!(matches!(
+        trace.events.last().unwrap().event,
+        Event::ServerKill
+    ));
+    for file in ["dune-project", "dune", "Main.v"] {
+        assert!(root.join("fixtures/current/project").join(file).is_file());
     }
 }

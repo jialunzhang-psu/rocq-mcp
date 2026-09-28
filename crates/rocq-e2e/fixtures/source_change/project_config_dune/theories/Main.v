@@ -1,1 +1,0 @@
-Theorem truth : True. Admitted.

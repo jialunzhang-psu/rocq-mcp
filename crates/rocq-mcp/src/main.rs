@@ -3,21 +3,17 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{ServiceExt, transport::stdio};
 use rocq_engine::{Engine, EngineConfig};
-use rocq_mcp::RocqServer;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use rocq_mcp::ServerRuntime;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let state = std::env::var_os("ROCQ_NEW_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("rocq-mcp-new"));
     let mut http = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--http" => http = Some(args.next().ok_or("--http requires an address")?),
             "--stdio" => {}
-            "--state-dir" => return Err("--state-dir is configured with ROCQ_NEW_STATE_DIR".into()),
             "-h" | "--help" => {
                 println!("rocq-mcp [--stdio|--http ADDRESS]");
                 return Ok(());
@@ -25,29 +21,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
-    let max_pet_processes = std::env::var("ROCQ_MAX_PET_PROCESSES")
-        .ok()
-        .map(|value| value.parse::<usize>())
-        .transpose()?
-        .unwrap_or(4);
-    let close_timeout = std::env::var("ROCQ_CLOSE_TIMEOUT_SECS")
+    let command_timeout = std::env::var("ROCQ_COMMAND_TIMEOUT_SECS")
         .ok()
         .map(|value| value.parse::<u64>())
         .transpose()?
-        .map(Duration::from_secs);
-    if close_timeout.is_some_and(|timeout| timeout.is_zero()) {
-        return Err("ROCQ_CLOSE_TIMEOUT_SECS must be positive".into());
-    }
-    let engine = Arc::new(Engine::new(EngineConfig {
-        state_parent: state,
-        operation_timeout: Duration::from_secs(20),
-        close_timeout,
-        // Design note: process capacity is a deployment resource limit, not an
-        // MCP/session concern. Keeping it in process configuration lets a
-        // one-process deployment exercise real eviction and replay semantics.
-        max_pet_processes,
-        ..Default::default()
-    })?);
+        .map(std::time::Duration::from_secs);
+    let engine = Arc::new(Engine::new(EngineConfig { command_timeout })?);
+    let runtime = Arc::new(ServerRuntime::new(engine));
     if let Some(address) = http {
         let address: std::net::SocketAddr = address.parse()?;
         if !address.ip().is_loopback() {
@@ -55,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let cancellation = CancellationToken::new();
         let service = StreamableHttpService::new(
-            move || Ok(RocqServer::new(engine.clone())),
+            move || Ok(runtime.connection()),
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default()
                 .with_cancellation_token(cancellation.child_token()),
@@ -69,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await?;
     } else {
-        let service = RocqServer::new(engine).serve(stdio()).await?;
+        let service = runtime.connection().serve(stdio()).await?;
         service.waiting().await?;
     }
     Ok(())

@@ -1,1 +1,0 @@
-Definition d : True. Admitted.

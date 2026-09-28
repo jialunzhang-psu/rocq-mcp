@@ -1,1 +1,0 @@
-Lemma l : True. Admitted.

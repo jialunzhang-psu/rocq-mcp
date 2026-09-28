@@ -1,7 +1,6 @@
 # E2E trace format
 
-A trace is JSONL (`.jsonl` or `.jsonl.zst`), executed in file order. It uses five
-events:
+A trace is plain JSONL (`.jsonl`), executed in file order. It uses five events:
 
 ```json
 {"event":"server_start"}
@@ -13,6 +12,9 @@ events:
 
 `command` holds a user ID, a complete tool call, and the exact expected JSON
 result. Output comparison ignores object key order, not missing or extra fields.
+The sole leaf marker `{"$checkpoint":true}` accepts any positive integer so a
+trace need not predict a connection-local allocation ID; every surrounding
+object and array remains exact.
 `user_connect` opens a fresh MCP session; it does not restore the previous
 selection. `user_disconnect` closes that session. `server_kill` terminates the
 server and all sessions; a later `server_start` starts a new process.
@@ -21,10 +23,8 @@ Two adjacent commands with the same non-empty `parallel_group` execute
 concurrently on different user connections. Their complete outputs are compared
 as an unordered pair. A parallel command may use
 `"expected":{"$one_of":[{...},{...}]}` for a finite set of exact results.
-Fault-injection traces may use `"expected":{"$transport":"lost"}` when a
-server crash prevents a response. These fields belong to the test runner, not
-the MCP request.
+These fields belong to the test runner, not the MCP request.
 
-Each trace is an isolation boundary. The compressed
-`TRACE_CASES.jsonl.zst` manifest maps matrix cases to command positions within
-those traces; its `case_index` is not a trace event or user-visible field.
+Each trace is an isolation boundary. The maintained
+`traces/current_protocol.jsonl` file covers all ten current tool names without
+retaining the deleted lane/eviction/timeout/fault abstractions.

@@ -1,19 +1,14 @@
 use crate::{
     Event, Result, ServerConfig, Trace, TraceError, UserId, assertion::assert_output,
-    client::UserConnection, open_trace, parser::parse_event, server::ServerController,
+    client::UserConnection, server::ServerController,
 };
-use std::{collections::HashMap, io::BufRead, path::Path};
-
-/// Fixture observer run after a successfully replayed event; it may mutate
-/// only disposable test state and reports failure through the runner result.
-type EventHook = dyn FnMut(usize, &Event) -> Result<()> + Send;
+use std::collections::HashMap;
 
 /// Executes one trace against an external rocq-mcp process. Each logical user
-/// owns an independent MCP session; only the server state directory is shared.
+/// owns an independent MCP session.
 pub struct TraceRunner {
     server: ServerController,
     users: HashMap<UserId, UserConnection>,
-    after_event: Option<Box<EventHook>>,
     pending_parallel: Option<(usize, Event)>,
 }
 
@@ -24,20 +19,8 @@ impl TraceRunner {
         Ok(Self {
             server: ServerController::new(config)?,
             users: HashMap::new(),
-            after_event: None,
             pending_parallel: None,
         })
-    }
-
-    /// Install a fixture-only observer after each successfully replayed event.
-    /// The observer may mutate only the disposable test environment; it cannot
-    /// change trace commands or expected outputs, and its failures fail replay.
-    pub fn with_after_event_hook(
-        mut self,
-        hook: impl FnMut(usize, &Event) -> Result<()> + Send + 'static,
-    ) -> Self {
-        self.after_event = Some(Box::new(hook));
-        self
     }
 
     /// Replay every event in source order and stop at the first failure.
@@ -46,39 +29,6 @@ impl TraceRunner {
             self.execute(located.line, &located.event).await?;
         }
         self.validate_finished(trace.events.last().map_or(0, |event| event.line))
-    }
-
-    /// Replay a JSONL file incrementally and retain only the current event.
-    ///
-    /// Input and output semantics are identical to [`Self::run`]. Parse,
-    /// lifecycle, transport, and assertion errors retain their physical line.
-    /// The server and all user transports must be balanced when EOF is reached.
-    pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let mut reader = open_trace(path.as_ref()).map_err(|source| TraceError::Io {
-            operation: "open trace",
-            source,
-        })?;
-        let mut source = String::new();
-        let mut line = 0usize;
-        loop {
-            source.clear();
-            let bytes = reader
-                .read_line(&mut source)
-                .map_err(|source| TraceError::Io {
-                    operation: "read trace",
-                    source,
-                })?;
-            if bytes == 0 {
-                break;
-            }
-            line += 1;
-            if source.trim().is_empty() {
-                continue;
-            }
-            let event = parse_event(line, &source)?;
-            self.execute(line, &event).await?;
-        }
-        self.validate_finished(line)
     }
 
     /// Require balanced lifecycle events.  A successful replay must not leave
@@ -140,10 +90,6 @@ impl TraceRunner {
                 event,
             )
             .await?;
-            if let Some(hook) = self.after_event.as_mut() {
-                hook(first_line, &first)?;
-                hook(line, event)?;
-            }
             return Ok(());
         }
         if matches!(
@@ -179,26 +125,11 @@ impl TraceRunner {
                 })?;
                 let actual = connection
                     .call(command, line, user.as_str(), self.server.call_timeout())
-                    .await;
-                if expected == &serde_json::json!({"$transport":"lost"}) {
-                    match actual {
-                        Err(TraceError::Transport { .. }) => Ok(()),
-                        Err(other) => Err(other),
-                        Ok(value) => Err(TraceError::OutputMismatch {
-                            line,
-                            expected: expected.clone(),
-                            actual: value,
-                        }),
-                    }
-                } else {
-                    assert_output(line, expected, &actual?)
-                }
+                    .await?;
+                assert_output(line, expected, &actual)
             }
         };
         result?;
-        if let Some(hook) = self.after_event.as_mut() {
-            hook(line, event)?;
-        }
         Ok(())
     }
 

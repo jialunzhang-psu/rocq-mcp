@@ -24,9 +24,6 @@ pub fn parse_trace(reader: impl BufRead) -> Result<Trace> {
 }
 
 /// Parse and validate one non-empty physical JSONL line.
-///
-/// This is shared by whole-file parsing and streaming replay so large matrix
-/// traces do not require retaining every repeated boundary payload in memory.
 pub(crate) fn parse_event(line: usize, source: &str) -> Result<Event> {
     let value: serde_json::Value =
         serde_json::from_str(source).map_err(|error| TraceError::Parse {
@@ -81,14 +78,6 @@ fn validate_event(line: usize, event: &Event) -> Result<()> {
                 message: "expected must be a JSON object".into(),
             });
         }
-        if expected.get("$transport").is_some()
-            && expected != &serde_json::json!({"$transport":"lost"})
-        {
-            return Err(TraceError::Parse {
-                line,
-                message: "expected transport outcome must be exactly {'$transport':'lost'}".into(),
-            });
-        }
         if parallel_group
             .as_deref()
             .is_some_and(|group| group.trim().is_empty())
@@ -124,9 +113,8 @@ fn validate_command(line: usize, command: &Command) -> Result<()> {
         });
     }
     // Design note: this is the trace-language allowlist, not a second server
-    // dispatcher.  Keep it synchronized with the ten-tool public MCP
-    // contract so generated discovery/rewind traces are parsed before they
-    // reach an external server.
+    // dispatcher. Keep it synchronized with the ten-tool public MCP contract
+    // so a checked trace is rejected before it reaches an external server.
     const TOOLS: [&str; 10] = [
         "start",
         "list_files",

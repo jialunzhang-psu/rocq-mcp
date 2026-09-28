@@ -144,6 +144,22 @@ fn run_dune_once(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        // Do not leave a compiler/build tree behind if the MCP process is
+        // terminated abruptly while Dune is running.
+        unsafe {
+            command.pre_exec(move || {
+                let result =
+                    nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL, 0, 0, 0);
+                if result == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
     let mut child = command.spawn().map_err(AttemptError::Start)?;
     let pid = Pid::from_raw(child.id() as i32);
     let stdout = match child.stdout.take() {

@@ -14,10 +14,13 @@ wrapper's trust policy. The wrapper never infers completion from source text.
 
 Errors are JSON objects of the form
 `{"kind":"invalid_request","message":"call start first"}`. The `message` gives
-the specific field, declaration, or Rocq diagnostic. Error kinds are listed
-under each tool below. `check` and `try` can also return errors *inside* their
-result, preserving ordered-alternative diagnostics without turning a rejected
-proof fragment into a protocol failure.
+the specific field, declaration, or Rocq diagnostic. Every tool after `start`
+first refreshes the typed Dune view and can therefore return
+`project_timeout` or `invalid_configuration`; tables below describe the
+operation-specific cases and repeat those common errors where useful. `check`
+and `try` can also return errors *inside* their result, preserving
+ordered-alternative diagnostics without turning a rejected proof fragment into
+a protocol failure.
 
 ## `start`
 
@@ -27,7 +30,10 @@ proof fragment into a protocol failure.
 
 Returns `{"attached":true}`. It only attaches the Dune workspace and does not
 start a workspace-wide PET declaration index. Call `list_files`, then
-`list_decls(file)` to discover a target.
+`list_decls(file)` to discover a target. Every call obtains a fresh typed Dune
+view under the shared project barrier. Reattaching the same workspace retires
+this connection's selected proof; if Dune's view changed, all connections keep
+their checkpoint text but discard the old PET state handles for lazy replay.
 
 | Error kind | When |
 |---|---|
@@ -43,7 +49,7 @@ start a workspace-wide PET declaration index. Call `list_files`, then
 ```
 
 Returns Dune's selected source files as workspace-relative `FileId` values.
-This operation does not invoke PET or parse source files.
+This operation re-queries Dune, but does not invoke PET or parse source files.
 
 ## `list_decls`
 
@@ -55,7 +61,8 @@ Asks PET once for the document declarations of exactly one Dune-selected
 source. Each declaration has an `id` containing the relative `file` and PET's
 complete `qualified_path`. Duplicate leaves in different nested modules remain
 distinct. The wrapper does not reconstruct module scopes or issue per-sentence
-AST requests, and it does not index unrelated workspace files.
+AST requests, and it does not index unrelated workspace files. The returned
+`file` and every declaration ID use normalized `/` separators.
 
 ## `query`
 
@@ -87,8 +94,9 @@ original tactic script. `goals` returns a proof state. Other variants return
 selected open proof, `type` and `notations` run in that proof's current
 replayed context. Without one, `search`, `type`, and `notations` require `at`
 and run after that declaration in its original source file. The wrapper never
-chooses a first file or library implicitly. Named queries likewise run after
-their target declaration, not in a synthetic theorem. Before returning cached
+chooses a first file or library implicitly. With an active proof, named queries
+also run in that proof's current PET state; without one they run after their
+target declaration, not in a synthetic theorem. Before returning cached
 goals, the server revalidates the declaration's source digest and Dune source
 selection; a changed or malformed environment is reported instead of exposing
 stale PET state.
@@ -99,7 +107,7 @@ stale PET state.
 | `not_found` | Target declaration does not exist. |
 | `ambiguous` | PET/Dune produced a duplicate exact declaration identity. |
 | `declaration_changed` | Selected proof no longer matches its declaration. |
-| `proof_timeout` | Timed out waiting for PET process recovery or runtime capacity. |
+| `proof_timeout` | The project PET child or its protocol transport was lost. |
 | `project_timeout` | Dune project discovery or description timed out. |
 | `invalid_configuration` | Project or query environment is unusable. |
 
@@ -123,7 +131,7 @@ or edit `(modules ...)`. Source insertion occurs only when the proof closes.
 | `invalid_declaration` | Invalid name, kind, statement, or lexical context. |
 | `ambiguous` | Declaration placement is not unique. |
 | `declaration_changed` | Target declaration changed while being created. |
-| `invalid_configuration` | Project layout, logical library, or state directory is unusable. |
+| `invalid_configuration` | Project layout, logical library, or PET environment is unusable. |
 
 ## `prove`
 
@@ -142,11 +150,15 @@ as completed.
 | Error kind | When |
 |---|---|
 | `invalid_request` | No project, or an invalid or extra argument. |
-| `not_found` | Declaration is absent or its proof record is closed. |
+| `invalid_declaration` | PET reports an unsupported proof declaration or a compound source command that cannot be published independently. |
+| `not_found` | The exact declaration is absent from the requested Dune-selected file. |
 | `ambiguous` | PET/Dune produced a duplicate exact declaration identity. |
 | `declaration_changed` | The declaration interface changed. |
-| `proof_timeout` | PET open or replay timed out. |
+| `proof_timeout` | The project PET child or its protocol transport was lost during open or replay. |
 | `project_timeout` | Dune project discovery or description timed out. |
+| `build_timeout` | An explicitly configured Dune-command deadline expired while validating a PET-finished declaration. |
+| `axiom_dependency_out_of_scope` | PET reports an axiom outside the selected Dune project. |
+| `unfinished_dependency` | PET reports dependence on an admitted or otherwise unfinished project declaration. |
 | `invalid_configuration` | Project, PET state, or proof environment is unusable. |
 
 ## `abandon`
@@ -155,16 +167,16 @@ as completed.
 {"tool":"abandon","args":{"declaration":{"file":"Main.v","qualified_path":["Demo","new_t"]}}}
 ```
 
-Discards one uniquely identified unpublished proof. Its open in-memory attempt is
-retired. It never deletes source code. Returns
-`{"abandoned":"Demo.new_t"}` and clears the connection's selected attempt.
+Discards one uniquely identified unpublished proof. Its in-memory proof session
+and PET state handles are retired; it never deletes source code. Returns
+`{"abandoned":"Demo.new_t"}` and clears the connection's selected proof.
 
 | Error kind | When |
 |---|---|
 | `invalid_request` | No project, invalid name, or extra argument. |
 | `not_found` | No active unpublished proof has the name. |
 | `ambiguous` | More than one unpublished proof has the exact identity. |
-| `invalid_configuration` | The project or in-memory trace state is unavailable. |
+| `invalid_configuration` | The project or in-memory proof state is unavailable. |
 
 ## `check`
 
@@ -186,28 +198,31 @@ ordered errors before it. If every fragment is rejected, `selected` is `null`,
 `error` is `null`. A selected solved proof closes automatically. `error` is
 reserved for a close, writeback, or trust failure after selection. A
 writeback/trust failure that preserves the anchored source leaves the proof
-`Open` on the selected trace. If the source CAS fails (`declaration_changed`)
-or a concurrent close already retired the trace (`not_found`), the diagnostic
+`Open` on the selected checkpoint graph. If the source CAS fails
+(`declaration_changed`) or a concurrent close already retired the proof
+(`not_found`), the diagnostic
 `Open` state has no checkpoint; the caller must reopen the declaration to
-observe its current source state.
+observe its current source state. A selected proof's nested `error` can also
+report native-build rejection or an explicit `build_timeout`, PET transport or
+configuration failure, `axiom_dependency_out_of_scope`, or
+`unfinished_dependency`; none is converted into `Completed`.
 
 The complete array is structurally validated before PET evaluates any
-fragment. Before consuming the selected PET state, the engine validates its
-source digest and current Dune source selection through the shared attempt
-gateway. Native close has no default build deadline; an explicit deadline can
-be set with `ROCQ_CLOSE_TIMEOUT_SECS`. PET/Rocq execution has a per-request
-process-safety watchdog. A non-responsive PET lane is killed and reported as
-`proof_timeout`; this watchdog is not a deadline on a valid native Dune build
-or on source publication. Runtime lane capacity and Dune metadata waits remain
-bounded separately.
+fragment. Before consuming the selected PET state, the wrapper validates its
+source digest and current Dune source selection. Native close has no default
+build deadline. An operator may set the single explicit Dune-command limit
+with `ROCQ_COMMAND_TIMEOUT_SECS`; PET proof execution itself has no
+wrapper-invented correctness deadline. `proof_timeout` is retained as the
+public compatibility name for loss of the PET child/transport, after which
+checkpoint states are invalidated and lazily replayed.
 
 | Top-level error kind | When |
 |---|---|
 | `invalid_request` | No selected proof, or invalid, empty, oversized, or extra input. |
 | `declaration_changed` | The declaration interface changed. |
-| `proof_timeout` | Timed out waiting for PET process recovery or runtime capacity. |
+| `proof_timeout` | The project PET child or its protocol transport was lost. |
 | `project_timeout` | Dune project discovery or description timed out. |
-| `invalid_configuration` | Project, saved state, or proof environment is unusable. |
+| `invalid_configuration` | Project, checkpoint state, or proof environment is unusable. |
 
 ## `try`
 
@@ -217,9 +232,9 @@ bounded separately.
 
 Accepts the same 1–20 multi-sentence proof fragments as `check` and evaluates
 all of them independently from the same selected PET state. It never appends a
-trace, changes selection or checkpoint, writes source, or closes a proof. The
+checkpoint, changes selection, writes source, or closes a proof. The
 current Dune source selection is checked before PET evaluates any fragment,
-so a cached PET lane cannot hide a changed project configuration.
+so a retained PET state cannot hide a changed project configuration.
 Returns
 `{"attempts":[{"solved":false,"state":<hypothetical proof state or null>,"error":<error or null>}]}`
 in input order. A rejected fragment exposes no partial-prefix state and has its
@@ -230,7 +245,7 @@ a checkpoint.
 |---|---|
 | `invalid_request` | No selected proof, invalid array, invalid fragment, or extra argument. |
 | `declaration_changed` | The declaration interface changed. |
-| `proof_timeout` | Timed out waiting for PET process recovery or runtime capacity. |
+| `proof_timeout` | The project PET child or its protocol transport was lost. |
 | `project_timeout` | Dune project discovery or description timed out. |
 | `invalid_configuration` | Project or proof environment is unusable. |
 
@@ -251,7 +266,7 @@ its whole selected fragment: a fragment that remains open creates one, while a
 solved fragment closes the active proof. An all-rejected `check` and every
 `try` create no boundary.
 The operation validates the source digest and current Dune source selection,
-replays the target trace in PET when its cached state is not available, and
+replays the selected checkpoint path in PET when its cached state is not available, and
 changes the selected checkpoint only after validation/replay succeeds.
 
 Returns:
@@ -272,7 +287,7 @@ reused.
 | Error kind | When |
 |---|---|
 | `invalid_request` | No selected proof, invalid or conflicting arguments, unavailable history, or an unknown/stale checkpoint. |
-| `not_found` | The proof root was retired or the attempt is unavailable. |
+| `not_found` | The proof root was retired or the selected proof is unavailable. |
 | `declaration_changed` | The source snapshot no longer matches the open proof. |
-| `proof_timeout` | PET replay or runtime recovery timed out. |
-| `invalid_configuration` | Project, PET, or trace state is unusable. |
+| `proof_timeout` | The project PET child or its protocol transport was lost during replay. |
+| `invalid_configuration` | Project, PET, or checkpoint state is unusable. |

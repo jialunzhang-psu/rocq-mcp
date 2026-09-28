@@ -18,31 +18,16 @@ pub use parser::parse_trace;
 pub use runner::TraceRunner;
 pub use server::ServerConfig;
 
-use std::{
-    fs::File,
-    io::{self, BufRead, BufReader},
-    path::Path,
-};
-
-/// Open either plain JSONL or a zstd-compressed JSONL trace as a streaming
-/// reader. Large boundary traces never need to fit in process memory.
-pub fn open_trace(path: impl AsRef<Path>) -> io::Result<Box<dyn BufRead + Send>> {
-    let path = path.as_ref();
-    let file = File::open(path)?;
-    if path.extension().is_some_and(|extension| extension == "zst") {
-        let decoder = zstd::stream::read::Decoder::new(file)?;
-        Ok(Box::new(BufReader::new(decoder)))
-    } else {
-        Ok(Box::new(BufReader::new(file)))
-    }
-}
+use std::{fs::File, io::BufReader, path::Path};
 
 /// Parse a trace from disk while retaining JSONL line numbers.
 pub fn load_trace(path: impl AsRef<Path>) -> Result<Trace> {
-    let reader = open_trace(path.as_ref()).map_err(|source| TraceError::Io {
-        operation: "open trace",
-        source,
-    })?;
+    let reader = File::open(path.as_ref())
+        .map(BufReader::new)
+        .map_err(|source| TraceError::Io {
+            operation: "open trace",
+            source,
+        })?;
     parse_trace(reader)
 }
 

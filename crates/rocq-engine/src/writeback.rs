@@ -1,346 +1,257 @@
-//! Synchronous PET/Dune-backed source writeback.
-//!
-//! This module owns exactly one transaction: derive a replacement from PET's
-//! range, compare-and-swap the source, build it with Dune, and restore the old
-//! bytes if validation fails. It stores no publication lifecycle or recovery
-//! record.
+//! PET-range-based compare-and-swap publication.
 
-use super::*;
-use std::collections::BTreeSet;
-use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use crate::types::PetWorkspace;
+use crate::{DeclarationTarget, DuneProject, Error, ErrorKind, PetActor, Result};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::Path,
+    time::Duration,
+};
 
-/// Fully rendered single-file CAS operation. PET ranges are consumed while
-/// constructing this value and are never retained as parallel source state.
-struct WritebackPlan {
-    path: PathBuf,
-    expected_digest: [u8; 32],
+/// Fully prepared, side-effect-free source transaction. Constructing this
+/// value performs the source CAS check and range rendering before MCP destroys
+/// any usable checkpoint handle.
+pub(crate) struct PreparedPublication {
+    path: std::path::PathBuf,
+    workspace: PetWorkspace,
+    original: Vec<u8>,
     replacement: Vec<u8>,
+    replacement_digest: [u8; 32],
 }
 
-/// PET-derived source trust policy: exact explicit axioms and forbidden holes.
-type FrozenTrust = (Vec<(String, String)>, BTreeSet<String>);
-
-/// Publish a PET-completed trace. Success means the source was atomically
-/// replaced and Dune accepted the resulting compilation unit. Every failure is
-/// returned directly; no `Pending` state is manufactured.
-pub(crate) fn publish(
-    engine: &Engine,
-    project: &Path,
-    declaration: &DeclarationSource,
-    commands: &[CanonicalTactic],
-    native: &pet::PetState,
-) -> Result<ProofState> {
-    let assumptions = engine
-        .pet
-        .candidate_assumptions(project, native, declaration, commands)
-        .map_err(|error| {
-            Error::new(
-                ErrorKind::InvalidConfiguration,
-                format!("PET assumption audit failed: {error}"),
-            )
-        })?;
-    let (allowed_axioms, forbidden_locals) = frozen_trust(
-        &engine.pet,
-        project,
-        &declaration.info.identity,
-        &assumptions,
-        engine.config.operation_timeout,
-    )?;
-    audit_assumption_report(&assumptions, &allowed_axioms, &forbidden_locals)?;
-
-    for retry in 0..=3 {
-        let plan = replacement_plan(engine, project, declaration, commands)?;
-        let original = fs::read(&plan.path).map_err(|_| {
-            Error::new(
-                ErrorKind::DeclarationChanged,
-                "target source disappeared during writeback",
-            )
-        })?;
-        let current_digest = <[u8; 32]>::from(Sha256::digest(&original));
-        if current_digest != plan.expected_digest {
-            if retry == 3 {
-                return Err(Error::new(
-                    ErrorKind::DeclarationChanged,
-                    "target source kept changing during writeback",
-                ));
-            }
-            continue;
-        }
-        atomic_write(&plan.path, &plan.replacement)?;
-        let target = plan.path.strip_prefix(project).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidConfiguration,
-                "source target escapes project",
-            )
-        })?;
-        if let Err(build_error) = native_build(
-            project,
-            target,
-            engine.config.close_timeout,
-            engine.config.operation_timeout,
-        ) {
-            atomic_write(&plan.path, &original).map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "Dune rejected the proof and the original source could not be restored",
-                )
-            })?;
-            // Dune owns derived artifacts and will reconcile them on its next
-            // build. The source CAS has been rolled back, so preserve the
-            // original concrete build failure instead of inventing Pending.
-            return Err(build_error);
-        }
-        engine.pet.invalidate_states(project);
-        return Ok(ProofState {
-            attempt: None,
-            theorem: DeclarationInfo {
-                identity: declaration.info.identity.clone(),
-                kind: declaration.info.kind,
-                statement: declaration.info.statement.clone(),
-            },
-            lifecycle: ProofLifecycle::Completed,
-            focused_goals: 0,
-            unfocused_goals: 0,
-            shelved_goals: 0,
-            given_up_goals: 0,
-            goals: String::new(),
-        });
-    }
-    unreachable!("bounded CAS loop returns on its final iteration")
-}
-
-/// Re-derive the current source edit from Dune ownership and PET ranges. The
-/// returned expected digest is the sole compare-and-swap precondition.
-fn replacement_plan(
-    engine: &Engine,
-    project: &Path,
-    declaration: &DeclarationSource,
-    commands: &[CanonicalTactic],
-) -> Result<WritebackPlan> {
-    if declaration.anchor.header.start < declaration.anchor.header.end {
-        let source = engine
-            .pet
-            .source_span(project, declaration)
-            .map_err(|error| engine.pet_error(error))?;
-        let bytes = fs::read(&source.anchor.source).map_err(|_| {
-            Error::new(
-                ErrorKind::DeclarationChanged,
-                "target source is unavailable",
-            )
-        })?;
-        if source.info.kind != declaration.info.kind
-            || source.info.statement != declaration.info.statement
-        {
-            return Err(Error::new(
-                ErrorKind::DeclarationChanged,
-                "target declaration changed while proof was open",
-            ));
-        }
-        let replacement = render_replacement(
-            &bytes,
-            source
-                .anchor
-                .declaration
-                .as_ref()
-                .map(|range| range.start..range.end)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::DeclarationChanged,
-                        "PET declaration range is unavailable",
-                    )
-                })?,
-            source.anchor.header.end,
-            declaration.info.kind,
-            commands,
-        )?;
-        return Ok(WritebackPlan {
-            path: source.anchor.source,
-            expected_digest: Sha256::digest(&bytes).into(),
-            replacement,
-        });
-    }
-
-    // A newly declared theorem is not yet in PET's table of contents. Dune
-    // still owns the target source and PET has already supplied an exact
-    // zero-width insertion point (EOF for top level, before `End` for a
-    // nested module).
-    let layout = dune::Layout::load(project, &[], engine.config.operation_timeout)?;
-    let path = layout.target(&declaration.library)?;
-    if !path.is_file() || !layout.files().contains(&path) {
+pub(crate) fn prepare(
+    project: &DuneProject,
+    target: &DeclarationTarget,
+    fragments: &[String],
+) -> Result<PreparedPublication> {
+    if !target.anchor.replaceable {
         return Err(Error::new(
-            ErrorKind::InvalidConfiguration,
-            "Dune has not selected the declaration target source",
+            ErrorKind::InvalidDeclaration,
+            "PET source range is shared by multiple declarations",
         ));
     }
-    let bytes = fs::read(&path).map_err(|_| {
+    let path = target.anchor.source.clone();
+    let workspace = project.pet_workspace(&path)?;
+    let original = fs::read(&path).map_err(|_| {
         Error::new(
-            ErrorKind::InvalidConfiguration,
-            "declaration target source is unavailable",
+            ErrorKind::DeclarationChanged,
+            "target source is unavailable",
         )
     })?;
-    if <[u8; 32]>::from(Sha256::digest(&bytes)) != declaration.anchor.digest {
+    if digest(&original) != target.anchor.digest {
         return Err(Error::new(
             ErrorKind::DeclarationChanged,
-            "declaration target changed while proof was open",
+            "target source changed while proof was open",
         ));
     }
-    let insertion = declaration.anchor.header.start;
-    if insertion != declaration.anchor.header.end || insertion > bytes.len() {
-        return Err(Error::new(
-            ErrorKind::DeclarationChanged,
-            "PET declaration insertion point is invalid",
-        ));
-    }
-    let mut inserted = String::new();
-    if insertion > 0 && bytes.get(insertion - 1) != Some(&b'\n') {
-        inserted.push('\n');
-    }
-    inserted.push_str(&declaration.info.statement);
-    inserted.push_str(".\n");
-    append_proof(&mut inserted, declaration.info.kind, commands);
-    let mut replacement = bytes[..insertion].to_vec();
-    replacement.extend_from_slice(inserted.as_bytes());
-    replacement.extend_from_slice(&bytes[insertion..]);
-    Ok(WritebackPlan {
+    let replacement = replacement(&original, target, fragments)?;
+    let replacement_digest = digest(&replacement);
+    Ok(PreparedPublication {
         path,
-        expected_digest: Sha256::digest(&bytes).into(),
+        workspace,
+        original,
         replacement,
+        replacement_digest,
     })
 }
 
-fn render_replacement(
-    bytes: &[u8],
-    range: Range<usize>,
-    header_end: usize,
-    kind: DeclarationKind,
-    commands: &[CanonicalTactic],
-) -> Result<Vec<u8>> {
-    if range.start > header_end || header_end > range.end || range.end > bytes.len() {
+/// Commit one prepared publication after MCP invalidates the project epoch.
+/// Any failure after replacement performs a CAS-safe restoration, rebuilds the
+/// source that actually won the race, and refreshes PET before returning.
+pub(crate) fn publish<T>(
+    project: &DuneProject,
+    actor: &PetActor,
+    prepared: PreparedPublication,
+    timeout: Option<Duration>,
+    validate: impl FnOnce(&DuneProject, &PetActor) -> Result<T>,
+) -> Result<T> {
+    let PreparedPublication {
+        path,
+        workspace,
+        original,
+        replacement,
+        replacement_digest,
+    } = prepared;
+    let original_digest = digest(&original);
+    let current = fs::read(&path);
+    if current
+        .as_ref()
+        .map_or(true, |current| digest(current) != original_digest)
+    {
+        // The MCP owner has already begun a project epoch. Admit the external
+        // winner through Dune/PET, but never replace its bytes.
+        restore_epoch(
+            project,
+            actor,
+            &path,
+            &workspace,
+            &original,
+            replacement_digest,
+            timeout,
+        )?;
         return Err(Error::new(
             ErrorKind::DeclarationChanged,
-            "PET returned an invalid declaration range",
+            "target source changed before publication commit",
         ));
     }
-    let header = std::str::from_utf8(&bytes[range.start..header_end]).map_err(|_| {
+    if let Err(error) = atomic_write(&path, &replacement) {
+        restore_epoch(
+            project,
+            actor,
+            &path,
+            &workspace,
+            &original,
+            replacement_digest,
+            timeout,
+        )?;
+        return Err(error);
+    }
+
+    let result = (|| {
+        native_build(project, &path, timeout)?;
+        require_digest(&path, replacement_digest)?;
+        actor.refresh_workspace(&workspace).map_err(refresh_error)?;
+        require_digest(&path, replacement_digest)?;
+        let value = validate(project, actor)?;
+        require_digest(&path, replacement_digest)?;
+        Ok(value)
+    })();
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let restored = restore_epoch(
+                project,
+                actor,
+                &path,
+                &workspace,
+                &original,
+                replacement_digest,
+                timeout,
+            )?;
+            if restored {
+                Err(error)
+            } else {
+                Err(Error::new(
+                    ErrorKind::DeclarationChanged,
+                    format!("source changed during failed publication; original error: {error}"),
+                ))
+            }
+        }
+    }
+}
+
+/// Restore the original bytes only when our exact replacement still owns the
+/// source. The resulting source is built and admitted as a fresh PET epoch.
+fn restore_epoch(
+    project: &DuneProject,
+    actor: &PetActor,
+    path: &Path,
+    workspace: &PetWorkspace,
+    original: &[u8],
+    replacement_digest: [u8; 32],
+    timeout: Option<Duration>,
+) -> Result<bool> {
+    let current = fs::read(path);
+    let restored = match current {
+        Ok(current) if digest(&current) == replacement_digest => {
+            atomic_write(path, original)?;
+            true
+        }
+        // An unreadable/missing path or different digest belongs to the
+        // external winner. Never recreate or overwrite it during rollback.
+        Ok(_) | Err(_) => false,
+    };
+    let build = native_build(project, path, timeout).map_err(|error| {
         Error::new(
             ErrorKind::InvalidConfiguration,
-            "Rocq source is not valid UTF-8",
+            format!("publication rollback build failed: {error}"),
         )
-    })?;
-    let mut body = header.to_owned();
-    if !body.ends_with(char::is_whitespace) {
-        body.push('\n');
+    });
+    let refresh = actor.refresh_workspace(workspace).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidConfiguration,
+            format!("publication rollback could not refresh PET: {error}"),
+        )
+    });
+    match (build, refresh) {
+        (Ok(()), Ok(())) => Ok(restored),
+        (Err(build), Ok(())) => Err(build),
+        (Ok(()), Err(refresh)) => Err(refresh),
+        (Err(build), Err(refresh)) => Err(Error::new(
+            ErrorKind::InvalidConfiguration,
+            format!("{build}; additionally, {refresh}"),
+        )),
     }
-    append_proof(&mut body, kind, commands);
-    let mut replacement = bytes[..range.start].to_vec();
-    replacement.extend_from_slice(body.as_bytes());
-    replacement.extend_from_slice(&bytes[range.end..]);
-    Ok(replacement)
 }
 
-fn append_proof(body: &mut String, kind: DeclarationKind, commands: &[CanonicalTactic]) {
-    if kind != DeclarationKind::Definition {
+fn replacement(
+    original: &[u8],
+    target: &DeclarationTarget,
+    fragments: &[String],
+) -> Result<Vec<u8>> {
+    let range = target.anchor.declaration.start..target.anchor.declaration.end;
+    if range.start > range.end || range.end > original.len() {
+        return Err(Error::new(
+            ErrorKind::DeclarationChanged,
+            "PET declaration range is invalid",
+        ));
+    }
+    let mut body = if let Some(header) = &target.new_header {
+        let mut text = String::new();
+        if range.start > 0 && original[range.start - 1] != b'\n' {
+            text.push('\n');
+        }
+        text.push_str(header);
+        text.push_str(".\n");
+        text
+    } else {
+        let header_end = target.anchor.header.end;
+        if range.start > header_end || header_end > range.end {
+            return Err(Error::new(
+                ErrorKind::DeclarationChanged,
+                "PET header range is invalid",
+            ));
+        }
+        let header = std::str::from_utf8(&original[range.start..header_end])
+            .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "Rocq source is not UTF-8"))?;
+        let mut text = header.to_owned();
+        if !header.trim_end().ends_with('.') {
+            text.push('.');
+        }
+        text.push('\n');
+        text
+    };
+    if target.info.kind != crate::DeclarationKind::Definition {
         body.push_str("Proof.\n");
     }
-    for command in commands {
-        body.push_str(&command.0);
+    for fragment in fragments {
+        body.push_str(fragment.trim());
         body.push('\n');
     }
-    body.push_str(kind.terminator());
+    body.push_str(target.info.kind.terminator());
     body.push('\n');
+    let mut output = original[..range.start].to_vec();
+    output.extend_from_slice(body.as_bytes());
+    output.extend_from_slice(&original[range.end..]);
+    Ok(output)
 }
 
-fn frozen_trust(
-    pet: &pet::PetRuntime,
-    project: &Path,
-    target: &DeclarationIdentity,
-    report: &pet::PetAssumptionReport,
-    timeout: Duration,
-) -> Result<FrozenTrust> {
-    let layout = dune::Layout::load(project, &[], timeout)?;
-    // Design note: `Print Assumptions` is the dependency oracle. Inspect only
-    // the Dune-owned source files that can define assumptions PET actually
-    // returned; scanning every project file would turn one close into a
-    // workspace index and make unrelated broken files semantically relevant.
-    let files = report
-        .assumptions
-        .iter()
-        .filter_map(|(name, _)| layout.source_for_constant(name))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let trust = pet
-        .source_trust(project, &files)
-        .map_err(|error| Error::new(ErrorKind::InvalidConfiguration, error.to_string()))?;
-    let target_name = format_name(target);
-    Ok((
-        trust.explicit_axioms,
-        trust
-            .admitted
-            .into_iter()
-            .filter(|name| name != &target_name)
-            .collect(),
-    ))
-}
-
-fn audit_assumption_report(
-    report: &pet::PetAssumptionReport,
-    allowed: &[(String, String)],
-    forbidden: &BTreeSet<String>,
-) -> Result<()> {
-    for (name, ty) in &report.assumptions {
-        if forbidden.contains(name) {
-            return Err(Error::new(
-                ErrorKind::UnfinishedDependency,
-                format!("proof depends on unfinished local declaration '{name}'"),
-            ));
-        }
-        if !allowed
-            .iter()
-            .any(|(allowed_name, allowed_type)| name == allowed_name && ty == allowed_type)
-        {
-            return Err(Error::new(
-                ErrorKind::AxiomDependencyOutOfScope,
-                format!("axiom dependency is outside the authorized baseline: {name}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Audit an already compiled source theorem under the same PET-supplied trust
-/// policy as interactive writeback.
-pub(crate) fn audit_existing_source(
-    engine: &Engine,
-    project: &Path,
-    source: &DeclarationSource,
-    report: &pet::PetAssumptionReport,
-    metadata_timeout: Duration,
-    _close_timeout: Option<Duration>,
-) -> Result<()> {
-    let (allowed, forbidden) = frozen_trust(
-        &engine.pet,
-        project,
-        &source.info.identity,
-        report,
-        metadata_timeout,
-    )?;
-    audit_assumption_report(report, &allowed, &forbidden)
-}
-
-/// Build one Dune-selected source target.
+/// Build exactly the target Dune reported for one source. No correctness
+/// deadline exists unless the operator explicitly configured one.
 pub(crate) fn native_build(
-    project: &Path,
-    target: &Path,
+    project: &DuneProject,
+    source: &Path,
     timeout: Option<Duration>,
-    layout_timeout: Duration,
 ) -> Result<()> {
-    let (workspace, dune_target) = dune_target(project, target, layout_timeout)?;
-    let output = dune::run_dune(
-        [OsString::from("build"), dune_target.into_os_string()],
-        &workspace,
+    let target = project.build_target(source)?;
+    let output = crate::dune::run_dune(
+        [
+            std::ffi::OsString::from("build"),
+            target.as_os_str().to_owned(),
+        ],
+        project.id(),
         timeout,
         None,
     )
@@ -360,53 +271,230 @@ pub(crate) fn native_build(
     if !output.status.success() {
         return Err(Error::new(
             ErrorKind::InvalidDeclaration,
-            "Dune rejected the proof source",
+            format!(
+                "Dune rejected the proof source: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
         ));
     }
     Ok(())
 }
 
-/// Map a project-relative source to the build target reported by Dune.
-pub(crate) fn dune_target(
-    project: &Path,
-    target: &Path,
-    timeout: Duration,
-) -> Result<(PathBuf, PathBuf)> {
-    let layout = dune::Layout::load(project, &[], timeout)?;
-    let workspace = layout.workspace_root().to_owned();
-    let source = fs::canonicalize(project.join(target)).map_err(|_| {
-        Error::new(
-            ErrorKind::InvalidConfiguration,
-            "Dune source target is unavailable",
-        )
-    })?;
-    let build_target = layout.build_target(&source)?;
-    Ok((workspace, build_target))
+/// Run a build epoch for an already-published declaration. PET is refreshed
+/// after both success and normal Dune rejection because either build may have
+/// replaced intermediate artifacts before reaching its terminal status.
+pub(crate) fn build_and_refresh<T>(
+    project: &DuneProject,
+    actor: &PetActor,
+    source: &Path,
+    timeout: Option<Duration>,
+    validate: impl FnOnce(&DuneProject, &PetActor) -> Result<T>,
+) -> Result<T> {
+    let workspace = project.pet_workspace(source)?;
+    let build = native_build(project, source, timeout);
+    let refresh = actor.refresh_workspace(&workspace).map_err(refresh_error);
+    match (build, refresh) {
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Ok(())) => validate(project, actor),
+    }
 }
 
-/// Atomically replace one file and fsync both file and containing directory.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::new(
-            ErrorKind::InvalidConfiguration,
-            "source has no parent directory",
-        )
-    })?;
-    let tmp = parent.join(format!(".rocq-mcp-writeback-{}.tmp", uuid::Uuid::now_v7()));
+    // RISK: POSIX has no atomic "replace only if these bytes still match"
+    // primitive. The transaction checks the digest immediately before this
+    // same-directory atomic rename and verifies ownership afterward, but a
+    // non-cooperating external writer can still race inside that narrow
+    // compare/rename interval. Project-internal writers are serialized by the
+    // MCP operation barrier.
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidConfiguration, "source has no parent"))?;
     let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&tmp, path)?;
+        let permissions = fs::metadata(path)?.permissions();
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".rocq-mcp-writeback-")
+            .tempfile_in(parent)?;
+        temporary.write_all(bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary.as_file().set_permissions(permissions)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
         File::open(parent)?.sync_all()
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
     result.map_err(|_| {
         Error::new(
             ErrorKind::InvalidConfiguration,
             "atomic source replacement failed",
         )
     })
+}
+
+fn require_digest(path: &Path, expected: [u8; 32]) -> Result<()> {
+    let current = fs::read(path).map_err(|_| {
+        Error::new(
+            ErrorKind::DeclarationChanged,
+            "published source became unavailable",
+        )
+    })?;
+    if digest(&current) == expected {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorKind::DeclarationChanged,
+            "source changed during publication",
+        ))
+    }
+}
+
+fn digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn refresh_error(error: crate::pet::PetError) -> Error {
+    let kind = if error.lost() {
+        ErrorKind::ProofTimeout
+    } else {
+        ErrorKind::InvalidConfiguration
+    };
+    Error::new(kind, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DeclarationIdentity, Engine, EngineConfig, FileId, OpenResult, PetStateId};
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        engine: Engine,
+        project: DuneProject,
+        actor: PetActor,
+        target: DeclarationTarget,
+        root_state: PetStateId,
+        source: std::path::PathBuf,
+        original: Vec<u8>,
+        dune_file: std::path::PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let dune_file = directory.path().join("dune");
+        fs::write(
+            directory.path().join("dune-project"),
+            "(lang dune 3.22)\n(using rocq 0.12)\n",
+        )
+        .unwrap();
+        fs::write(&dune_file, "(rocq.theory (name Demo))\n").unwrap();
+        let source = directory.path().join("A.v");
+        let original = b"Theorem t : True. Admitted.\n".to_vec();
+        fs::write(&source, &original).unwrap();
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let project = engine.attach(directory.path()).unwrap();
+        let actor = PetActor::new();
+        let identity = DeclarationIdentity {
+            file: FileId("A.v".into()),
+            qualified_path: vec!["Demo".into(), "A".into(), "t".into()],
+        };
+        let opened = match engine.open_declaration(&project, &actor, identity).unwrap() {
+            OpenResult::Open(opened) => opened,
+            OpenResult::Published(_) => panic!("fixture theorem must be open"),
+        };
+        Fixture {
+            _directory: directory,
+            engine,
+            project,
+            actor,
+            target: opened.target,
+            root_state: opened.state,
+            source,
+            original,
+            dune_file,
+        }
+    }
+
+    #[test]
+    fn publication_rejects_a_range_shared_by_multiple_declarations() {
+        let fixture = fixture();
+        let mut target = fixture.target.clone();
+        target.anchor.replaceable = false;
+        let error = prepare(&fixture.project, &target, &["exact I.".into()])
+            .err()
+            .expect("shared range must fail closed");
+        assert_eq!(error.kind, ErrorKind::InvalidDeclaration);
+        assert_eq!(fs::read(&fixture.source).unwrap(), fixture.original);
+    }
+
+    #[test]
+    fn commit_rechecks_source_and_admits_the_external_winner() {
+        let fixture = fixture();
+        let prepared = prepare(&fixture.project, &fixture.target, &["exact I.".into()]).unwrap();
+        let external = b"Theorem t : True. exact I. Qed.\nDefinition external_won := 1.\n";
+        fs::write(&fixture.source, external).unwrap();
+        let error = publish(&fixture.project, &fixture.actor, prepared, None, |_, _| {
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::DeclarationChanged);
+        assert_eq!(fs::read(&fixture.source).unwrap(), external);
+        assert!(fixture.actor.goals(fixture.root_state).is_err());
+    }
+
+    #[test]
+    fn rollback_never_replaces_an_external_edit() {
+        let fixture = fixture();
+        let prepared = prepare(&fixture.project, &fixture.target, &["exact I.".into()]).unwrap();
+        let external = b"Theorem t : True. exact I. Qed.\nDefinition external_won := 2.\n";
+        let source = fixture.source.clone();
+        let error = publish(&fixture.project, &fixture.actor, prepared, None, |_, _| {
+            fs::write(&source, external).unwrap();
+            Err::<(), _>(Error::new(
+                ErrorKind::InvalidDeclaration,
+                "injected post-build validation failure",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::DeclarationChanged);
+        assert_eq!(fs::read(&fixture.source).unwrap(), external);
+    }
+
+    #[test]
+    fn failed_build_restores_source_and_refreshes_pet() {
+        let fixture = fixture();
+        let prepared = prepare(&fixture.project, &fixture.target, &["exact I.".into()]).unwrap();
+        fs::write(&fixture.dune_file, "(this is not a valid dune stanza)\n").unwrap();
+        assert!(
+            publish(&fixture.project, &fixture.actor, prepared, None, |_, _| Ok(
+                ()
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read(&fixture.source).unwrap(), fixture.original);
+        assert!(fixture.actor.goals(fixture.root_state).is_err());
+
+        fs::write(&fixture.dune_file, "(rocq.theory (name Demo))\n").unwrap();
+        let declarations = fixture
+            .engine
+            .list_decls(&fixture.project, &fixture.actor, &FileId("A.v".into()))
+            .unwrap();
+        assert_eq!(declarations.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_atomic_write_preserves_source_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = fixture();
+        fs::set_permissions(&fixture.source, fs::Permissions::from_mode(0o640)).unwrap();
+        let prepared = prepare(&fixture.project, &fixture.target, &["exact I.".into()]).unwrap();
+        publish(&fixture.project, &fixture.actor, prepared, None, |_, _| {
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&fixture.source).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
 }

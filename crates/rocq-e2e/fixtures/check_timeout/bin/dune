@@ -1,7 +1,0 @@
-#!/bin/sh
-# Design note: only a native build arms the injected Rocq dependency timeout;
-# metadata discovery and PET replay must remain real, unfaulted operations.
-if [ "$1" = "build" ]; then
-  : > "$ROCQ_E2E_TIMEOUT_ARM_MARKER"
-fi
-exec "$ROCQ_E2E_REAL_DUNE" "$@"
