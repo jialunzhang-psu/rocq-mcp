@@ -4,7 +4,7 @@
 //! semantic queries. This module owns only JSON-RPC framing and child-process
 //! lifecycle; it contains no proof graph, source scanner, or replay cache.
 
-use crate::types::PetWorkspace;
+use crate::types::{GoalFocus, GoalStackFrame, PetWorkspace, ProofDiagnostic};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +29,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "refresh_workspace_v1",
     "structured_assumptions_v1",
     "typed_errors_v1",
+    "diagnostic_ranges_v1",
 ];
 
 fn configured_pet_binary() -> PathBuf {
@@ -87,6 +88,20 @@ impl PetRemoteKind {
             code => Self::Unknown(code),
         }
     }
+
+    /// Whether this remote class is a Rocq/user-semantic rejection whose
+    /// diagnostic must cross the MCP boundary unchanged.
+    pub(crate) fn is_semantic(self) -> bool {
+        matches!(
+            self,
+            Self::Interrupted
+                | Self::Parsing
+                | Self::Coq
+                | Self::TheoremNotFound
+                | Self::NoNodeAtPoint
+                | Self::ReferenceNotFound
+        )
+    }
 }
 
 /// PET client failures are separated into local validation, project setup,
@@ -108,6 +123,7 @@ pub enum PetError {
         code: i64,
         kind: PetRemoteKind,
         message: String,
+        diagnostic: Option<ProofDiagnostic>,
     },
 }
 
@@ -142,16 +158,92 @@ impl PetError {
         )
     }
 
+    /// Whether this error is a Rocq/user-semantic rejection.  This flag is
+    /// used by every outer operation, including publication refresh, so a
+    /// semantic diagnostic is never accidentally wrapped in infrastructure
+    /// advice merely because it crossed a different lifecycle boundary.
+    pub fn is_semantic(&self) -> bool {
+        matches!(self, Self::Remote { kind, .. } if kind.is_semantic())
+    }
+
     pub(crate) fn lost(&self) -> bool {
         self.is_transport_loss()
     }
+
+    /// Return the backend-neutral message safe to expose through MCP.
+    ///
+    /// The typed variant is the public classification authority. Numeric
+    /// JSON-RPC codes and the PET implementation name remain available in
+    /// `Display` for internal diagnostics, but are not actionable for an MCP
+    /// caller. Semantic rejections preserve Rocq's original message verbatim.
+    pub fn public_message(&self) -> String {
+        match self {
+            Self::Invalid(message) | Self::Environment(message) | Self::ProcessLost(message) => {
+                neutralize_transport_detail(message)
+            }
+            Self::Cancelled => "request cancelled".into(),
+            Self::TimedOut { timeout_ms } => {
+                format!("proof fragment exceeded {timeout_ms} ms")
+            }
+            Self::Protocol(_) => "received an invalid response".into(),
+            Self::OutputOverflow => "response exceeded the output limit".into(),
+            Self::Remote {
+                kind: PetRemoteKind::MethodNotFound,
+                ..
+            } => "a required operation is not supported".into(),
+            Self::Remote {
+                kind: PetRemoteKind::Anomaly,
+                ..
+            } => "internal proof execution anomaly".into(),
+            Self::Remote {
+                kind: PetRemoteKind::System,
+                ..
+            } => "proof execution system failure".into(),
+            Self::Remote {
+                kind: PetRemoteKind::Unknown(_),
+                ..
+            } => "unrecognized proof execution failure".into(),
+            Self::Remote { message, .. } => message.clone(),
+        }
+    }
+}
+
+/// Keep useful operating-system details (for example `Broken pipe` and a
+/// signal number) without making the MCP response depend on the selected
+/// prover's product name or JSON-RPC code vocabulary. Semantic remote
+/// diagnostics do not pass through this function and remain byte-for-byte
+/// unchanged.
+fn neutralize_transport_detail(message: &str) -> String {
+    // Design note: only non-semantic local transport text is normalized;
+    // remote Rocq diagnostics take a separate, lossless path above.
+    let mut value = message.replace("petanque", "prover protocol");
+    value = value.replace("PET", "prover");
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut redacted = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '-'
+            && index + 6 <= chars.len()
+            && chars[index + 1..index + 6]
+                .iter()
+                .all(|character| character.is_ascii_digit())
+        {
+            redacted.push_str("(internal error code)");
+            index += 6;
+        } else {
+            redacted.push(chars[index]);
+            index += 1;
+        }
+    }
+    redacted
 }
 
 impl std::fmt::Display for PetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid(message) => write!(f, "invalid PET request: {message}"),
-            Self::Environment(message) | Self::ProcessLost(message) => f.write_str(message),
+            Self::Environment(message) => write!(f, "PET environment failure: {message}"),
+            Self::ProcessLost(message) => write!(f, "PET process lost: {message}"),
             Self::Cancelled => f.write_str("PET request was cancelled"),
             Self::TimedOut { timeout_ms } => {
                 write!(f, "PET proof fragment exceeded {timeout_ms} ms")
@@ -183,11 +275,18 @@ pub(crate) struct PetGoal {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PetGoalStackFrame {
+    pub(crate) left: Vec<PetGoal>,
+    pub(crate) right: Vec<PetGoal>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PetGoals {
     pub(crate) focused: Vec<PetGoal>,
-    pub(crate) unfocused: Vec<PetGoal>,
+    pub(crate) stack: Vec<PetGoalStackFrame>,
     pub(crate) shelved: Vec<PetGoal>,
     pub(crate) given_up: Vec<PetGoal>,
+    pub(crate) bullet: Option<String>,
     pub(crate) proof_mode: bool,
 }
 
@@ -195,10 +294,34 @@ impl PetGoals {
     fn outside_proof() -> Self {
         Self {
             focused: Vec::new(),
-            unfocused: Vec::new(),
+            stack: Vec::new(),
             shelved: Vec::new(),
             given_up: Vec::new(),
+            bullet: None,
             proof_mode: false,
+        }
+    }
+
+    pub(crate) fn focus(&self) -> GoalFocus {
+        let ids = |goals: &[PetGoal]| {
+            goals
+                .iter()
+                .map(|goal| goal.evar.clone())
+                .collect::<Vec<_>>()
+        };
+        GoalFocus {
+            focused: ids(&self.focused),
+            stack: self
+                .stack
+                .iter()
+                .map(|frame| GoalStackFrame {
+                    left: ids(&frame.left),
+                    right: ids(&frame.right),
+                })
+                .collect(),
+            shelved: ids(&self.shelved),
+            given_up: ids(&self.given_up),
+            next_bullet: self.bullet.clone(),
         }
     }
 }
@@ -349,7 +472,7 @@ impl PetActor {
         offset: usize,
     ) -> Result<PetExecution, PetError> {
         let text = fs::read_to_string(source)
-            .map_err(|_| PetError::Environment("PET source is unavailable".into()))?;
+            .map_err(|_| PetError::Environment("source is unavailable".into()))?;
         let position = source_position(&text, offset)?;
         let value = self.call_in_workspace(
             workspace,
@@ -381,7 +504,21 @@ impl PetActor {
             "petanque/run",
             json!({"st": state.get(), "tac": fragment}),
             timeout,
-        )?;
+        );
+        if let Err(PetError::Remote {
+            diagnostic: Some(diagnostic),
+            ..
+        }) = &value
+            && (diagnostic.byte_end > fragment.len()
+                || !fragment.is_char_boundary(diagnostic.byte_start)
+                || !fragment.is_char_boundary(diagnostic.byte_end))
+        {
+            let error =
+                PetError::Protocol("PET diagnostic range is outside the submitted fragment".into());
+            self.poison_if_invalidated(&error);
+            return Err(error);
+        }
+        let value = value?;
         self.materialize_run(value)
     }
 
@@ -614,7 +751,7 @@ impl PetActor {
     ) -> Result<Value, PetError> {
         let mut state = self.lock_state();
         let Some(process) = state.process.as_mut() else {
-            return Err(PetError::ProcessLost("PET process is not running".into()));
+            return Err(PetError::ProcessLost("process is not running".into()));
         };
         let result = process.rpc_with_timeout(method, params, timeout);
         if result.as_ref().is_err_and(PetError::invalidates_process) {
@@ -802,19 +939,19 @@ impl PetProcess {
             .stderr(Stdio::piped());
         configure_pet_command(&mut command);
         let (mut child, lifeline) = spawn_pet_child(command).map_err(|error| {
-            PetError::Environment(format!("PET executable is unavailable: {error}"))
+            PetError::Environment(format!("executable is unavailable: {error}"))
         })?;
         let stdin = child.stdin.take().ok_or_else(|| {
             terminate_child(&mut child);
-            PetError::ProcessLost("PET stdin is unavailable".into())
+            PetError::ProcessLost("input channel is unavailable".into())
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
             terminate_child(&mut child);
-            PetError::ProcessLost("PET stdout is unavailable".into())
+            PetError::ProcessLost("output channel is unavailable".into())
         })?;
         let stderr = child.stderr.take().ok_or_else(|| {
             terminate_child(&mut child);
-            PetError::ProcessLost("PET stderr is unavailable".into())
+            PetError::ProcessLost("diagnostic channel is unavailable".into())
         })?;
         let stderr_capture = Arc::new(Mutex::new(StderrTail::default()));
         let capture = Arc::clone(&stderr_capture);
@@ -823,7 +960,7 @@ impl PetProcess {
             .spawn(move || drain_stderr(stderr, capture))
             .map_err(|error| {
                 terminate_child(&mut child);
-                PetError::Environment(format!("PET stderr reader is unavailable: {error}"))
+                PetError::Environment(format!("diagnostic reader is unavailable: {error}"))
             })?;
         Ok(Self {
             child,
@@ -854,9 +991,9 @@ impl PetProcess {
         let request = serde_json::to_vec(&json!({
             "jsonrpc": "2.0", "id": id, "method": method, "params": params,
         }))
-        .map_err(|_| PetError::Invalid("PET request encoding failed".into()))?;
+        .map_err(|_| PetError::Invalid("request encoding failed".into()))?;
         if request.len() > MAX_REQUEST_BYTES {
-            return Err(PetError::Invalid("PET request is oversized".into()));
+            return Err(PetError::Invalid("request is oversized".into()));
         }
         let deadline = timeout.map(ResponseDeadline::new).transpose()?;
         if cancellation::request_cancelled() {
@@ -888,7 +1025,7 @@ impl PetProcess {
             PetError::ProcessLost(message) => PetError::ProcessLost(format!("{message}; {detail}")),
             PetError::Protocol(message) => PetError::Protocol(format!("{message}; {detail}")),
             PetError::OutputOverflow => {
-                PetError::Protocol(format!("PET response exceeded the output limit; {detail}"))
+                PetError::Protocol(format!("response exceeded the output limit; {detail}"))
             }
             other => other,
         }
@@ -896,7 +1033,7 @@ impl PetProcess {
 
     fn transport_error(&mut self, operation: &str, error: io::Error) -> PetError {
         PetError::ProcessLost(format!(
-            "PET {operation} failed: {error}; {}",
+            "connection {operation} failed: {error}; {}",
             self.process_diagnostic()
         ))
     }
@@ -1022,7 +1159,7 @@ fn spawn_pet_child(mut command: Command) -> io::Result<(Child, Option<PetLifelin
             }
             Err(_) => {
                 let _ = thread.join();
-                return Err(io::Error::other("PET launcher exited before spawn"));
+                return Err(io::Error::other("launcher exited before spawn"));
             }
         };
         let lifeline = PetLifeline {
@@ -1050,7 +1187,7 @@ fn handshake(process: &mut PetProcess) -> Result<(), PetError> {
         Ok(())
     } else {
         Err(PetError::Environment(format!(
-            "PET is missing required capabilities: {}",
+            "required capabilities are missing: {}",
             missing.join(", ")
         )))
     }
@@ -1079,18 +1216,18 @@ struct ResponseDeadline {
 impl ResponseDeadline {
     fn new(timeout: std::time::Duration) -> Result<Self, PetError> {
         if timeout.is_zero() {
-            return Err(PetError::Invalid("PET timeout must be positive".into()));
+            return Err(PetError::Invalid("timeout must be positive".into()));
         }
         let timeout_ms = u64::try_from(timeout.as_millis())
-            .map_err(|_| PetError::Invalid("PET timeout is too large".into()))?;
+            .map_err(|_| PetError::Invalid("timeout is too large".into()))?;
         if timeout_ms == 0 {
             return Err(PetError::Invalid(
-                "PET timeout must be at least one millisecond".into(),
+                "timeout must be at least one millisecond".into(),
             ));
         }
         let at = std::time::Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| PetError::Invalid("PET timeout is too large".into()))?;
+            .ok_or_else(|| PetError::Invalid("timeout is too large".into()))?;
         Ok(Self { at, timeout_ms })
     }
 
@@ -1152,7 +1289,7 @@ fn read_response(
         reader,
         &mut body,
         deadline,
-        &format!("PET stdout body read failed after Content-Length {length}"),
+        &format!("output body read failed after Content-Length {length}"),
     )?;
     let mut deserializer = serde_json::Deserializer::from_slice(&body);
     deserializer.disable_recursion_limit();
@@ -1186,16 +1323,67 @@ fn read_response(
             .and_then(Value::as_str)
             .ok_or_else(|| PetError::Protocol("PET error has no message".into()))?
             .to_owned();
+        if message.trim().is_empty() {
+            return Err(PetError::Protocol("PET error message is empty".into()));
+        }
+        let diagnostic = error
+            .get("data")
+            .map(parse_pet_diagnostic)
+            .transpose()?
+            .flatten();
         return Err(PetError::Remote {
             code,
             kind: PetRemoteKind::from_code(code),
             message,
+            diagnostic,
         });
     }
     object
         .get("result")
         .cloned()
         .ok_or_else(|| PetError::Protocol("PET response has no result".into()))
+}
+
+/// Decode the optional range that PET attaches to a rejected proof fragment.
+/// The JSON shell currently transports this through its standard feedback
+/// envelope; accepting both a list and a single object keeps the decoder
+/// forward-compatible without interpreting human-readable diagnostics.
+fn parse_pet_diagnostic(value: &Value) -> Result<Option<ProofDiagnostic>, PetError> {
+    let entries = value
+        .as_array()
+        .map(|entries| entries.as_slice())
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    for entry in entries {
+        let Some(range) = entry.get("range") else {
+            continue;
+        };
+        if range.is_null() {
+            continue;
+        }
+        let start = range
+            .get("start")
+            .and_then(|point| point.get("offset"))
+            .and_then(Value::as_u64)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| PetError::Protocol("PET diagnostic start offset is invalid".into()))?;
+        let end = range
+            .get("end")
+            .or_else(|| range.get("end_"))
+            .and_then(|point| point.get("offset"))
+            .and_then(Value::as_u64)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| PetError::Protocol("PET diagnostic end offset is invalid".into()))?;
+        if start > end {
+            return Err(PetError::Protocol(
+                "PET diagnostic range is reversed".into(),
+            ));
+        }
+        return Ok(Some(ProofDiagnostic {
+            byte_start: start,
+            byte_end: end,
+        }));
+    }
+    Ok(None)
 }
 
 fn trim_ascii_space(value: &[u8]) -> &[u8] {
@@ -1217,7 +1405,7 @@ fn read_line_bounded(
 ) -> Result<(), PetError> {
     loop {
         let mut byte = [0];
-        read_exact_interruptible(reader, &mut byte, deadline, "PET stdout header read failed")?;
+        read_exact_interruptible(reader, &mut byte, deadline, "output header read failed")?;
         line.push(byte[0]);
         if byte[0] == b'\n' {
             return Ok(());
@@ -1303,7 +1491,7 @@ fn wait_for_pet_output(
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
                 return Err(PetError::ProcessLost(format!(
-                    "PET stdout readiness wait failed: {error}"
+                    "output readiness wait failed: {error}"
                 )));
             }
         }
@@ -1524,10 +1712,7 @@ while True:
 
         let error = process.rpc("test/eof", json!({})).unwrap_err();
         let message = error.to_string();
-        assert!(
-            message.contains("PET stdout header read failed"),
-            "{message}"
-        );
+        assert!(message.contains("output header read failed"), "{message}");
         assert!(message.contains("failed to fill whole buffer"), "{message}");
         assert!(message.contains("exit status: 23"), "{message}");
         assert!(message.contains("EOF-DIAGNOSTIC"), "{message}");
@@ -1610,6 +1795,102 @@ while True:
     }
 
     #[test]
+    fn public_messages_separate_rocq_diagnostics_from_transport_details() {
+        let semantic = PetError::Remote {
+            code: -32008,
+            kind: PetRemoteKind::ReferenceNotFound,
+            message: "Reference_not_found: pt_generated".into(),
+            diagnostic: None,
+        };
+        assert_eq!(
+            semantic.public_message(),
+            "Reference_not_found: pt_generated"
+        );
+        assert!(!semantic.public_message().contains("-32008"));
+        assert!(!semantic.public_message().contains("PET"));
+
+        let unsupported = PetError::Remote {
+            code: -32601,
+            kind: PetRemoteKind::MethodNotFound,
+            message: "method petanque/legacy not found".into(),
+            diagnostic: None,
+        };
+        assert_eq!(
+            unsupported.public_message(),
+            "a required operation is not supported"
+        );
+        assert!(!unsupported.public_message().contains("petanque"));
+        assert!(!unsupported.public_message().contains("-32601"));
+
+        for (kind, expected) in [
+            (PetRemoteKind::Anomaly, "internal proof execution anomaly"),
+            (PetRemoteKind::System, "proof execution system failure"),
+            (
+                PetRemoteKind::Unknown(-32999),
+                "unrecognized proof execution failure",
+            ),
+        ] {
+            let error = PetError::Remote {
+                code: -32999,
+                kind,
+                message: "implementation detail: PET crashed".into(),
+                diagnostic: None,
+            };
+            assert_eq!(error.public_message(), expected);
+            assert!(!error.public_message().contains("PET"));
+            assert!(!error.public_message().contains("-32999"));
+        }
+
+        for error in [
+            PetError::Protocol("bad JSON-RPC response".into()),
+            PetError::OutputOverflow,
+        ] {
+            let message = error.public_message();
+            assert!(!message.contains("PET"), "{message}");
+            assert!(!message.contains("JSON-RPC"), "{message}");
+        }
+        let transport =
+            PetError::ProcessLost("PET petanque connection failed: Broken pipe (-32008)".into());
+        let message = transport.public_message();
+        assert!(message.contains("Broken pipe"));
+        assert!(!message.contains("PET"));
+        assert!(!message.contains("petanque"));
+        assert!(!message.contains("-32008"));
+
+        // The implementation-facing formatter remains useful for logs; only
+        // the MCP projection is intentionally backend-neutral.
+        assert!(semantic.to_string().contains("-32008"));
+    }
+
+    #[test]
+    fn remote_error_data_preserves_pet_byte_range() {
+        let data = json!([{
+            "range": {
+                "start": {"line": 0, "character": 12, "offset": 12},
+                "end": {"line": 0, "character": 20, "offset": 20}
+            },
+            "level": 1,
+            "text": "bad tactic"
+        }]);
+        assert_eq!(
+            parse_pet_diagnostic(&data).unwrap(),
+            Some(ProofDiagnostic {
+                byte_start: 12,
+                byte_end: 20,
+            })
+        );
+        for malformed in [
+            json!({"range":{"start":{"offset":20},"end":{"offset":12}}}),
+            json!({"range":{"start":{},"end":{"offset":12}}}),
+        ] {
+            assert!(matches!(
+                parse_pet_diagnostic(&malformed),
+                Err(PetError::Protocol(_))
+            ));
+        }
+    }
+
+    #[test]
     fn malformed_typed_response_discards_the_pet_process() {
         let directory = tempfile::tempdir().unwrap();
         let script = directory.path().join("fake-pet.py");
@@ -1634,7 +1915,8 @@ while True:
         result = [
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
-            "refresh_workspace_v1", "structured_assumptions_v1", "typed_errors_v1"]
+            "refresh_workspace_v1", "structured_assumptions_v1", "typed_errors_v1",
+            "diagnostic_ranges_v1"]
     elif method == "petanque/setWorkspace":
         result = None
     elif method == "petanque/document_declarations":
@@ -1698,7 +1980,7 @@ while True:
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
             "refresh_workspace_v1", "state_count_v1",
-            "structured_assumptions_v1", "typed_errors_v1"]}}
+            "structured_assumptions_v1", "typed_errors_v1", "diagnostic_ranges_v1"]}}
     elif method == "petanque/refresh_workspace":
         payload = {{"jsonrpc":"2.0", "id":request["id"],
                    "error":{{"code":-32000, "message":"forced refresh failure"}}}}

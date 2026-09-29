@@ -7,7 +7,7 @@ use crate::{
 };
 use rocq_engine::{
     DeclarationIdentity, DeclarationInfo, DeclarationKind, Engine, Error, ErrorKind, FileId,
-    OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, pet, validate_fragments,
+    GoalScope, OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, pet, validate_fragments,
 };
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -35,24 +35,177 @@ pub(crate) fn public_error(error: &Error) -> Value {
         ErrorKind::AxiomDependencyOutOfScope => "axiom_dependency_out_of_scope",
         ErrorKind::UnfinishedDependency => "unfinished_dependency",
     };
-    json!({"kind": kind, "message": error.message})
+    let mut value = json!({"kind": kind, "message": public_message(error)});
+    if let Some(diagnostic) = &error.diagnostic {
+        value["diagnostic"] = json!({
+            "byte_range": {
+                "start": diagnostic.byte_start,
+                "end": diagnostic.byte_end,
+            }
+        });
+    }
+    value
 }
 
-fn state_json(state: &ProofState, checkpoint: Option<CheckpointId>) -> Value {
+/// Add a concrete recovery step for infrastructure and lifecycle failures.
+///
+/// Rocq diagnostics are deliberately left untouched: changing their wording
+/// makes a tactic or query failure harder to repair.  The engine marks those
+/// errors explicitly; this function never guesses from their text. The
+/// remaining classes are wrapper-owned failures, so the response tells the
+/// caller what to do next instead of exposing protocol vocabulary or numeric
+/// codes.
+fn public_message(error: &Error) -> String {
+    // The engine marks semantic PET rejections explicitly. Do not infer
+    // semantics from wording or from the presence of a source range: a
+    // malformed infrastructure response may also carry metadata.
+    if error.semantic {
+        return error.message.clone();
+    }
+    let action = match error.kind {
+        ErrorKind::InvalidConfiguration => {
+            Some("check the project configuration or prover capabilities, then restart the server")
+        }
+        ErrorKind::NotFound => {
+            Some("call list_files/list_decls or query(goals) to obtain a current identity or state")
+        }
+        ErrorKind::Ambiguous => Some("use the exact declaration identity returned by list_decls"),
+        ErrorKind::DeclarationChanged => {
+            Some("refresh the declaration with prove and retry the proof")
+        }
+        ErrorKind::ProofStepFailed => {
+            Some("inspect query(goals) and submit a smaller valid fragment")
+        }
+        ErrorKind::ProofStepTimeout => {
+            Some("retry with a larger timeout_ms or split the fragment into smaller steps")
+        }
+        ErrorKind::RequestCancelled => Some("retry the cancelled operation when ready"),
+        ErrorKind::PetLost => {
+            Some("retry the operation; any retained proof state will be replayed automatically")
+        }
+        ErrorKind::PetFailure => {
+            Some("restart the server; if this repeats, rebuild its bundled prover")
+        }
+        ErrorKind::ProjectTimeout => Some("retry or increase ROCQ_COMMAND_TIMEOUT_SECS"),
+        ErrorKind::BuildTimeout => {
+            Some("retry with a larger ROCQ_COMMAND_TIMEOUT_SECS value or unset the limit")
+        }
+        ErrorKind::AxiomDependencyOutOfScope => {
+            Some("inspect query(kind=assumptions) and replace the disallowed dependency")
+        }
+        ErrorKind::UnfinishedDependency => {
+            Some("prove or replace the unfinished dependency, then retry")
+        }
+        ErrorKind::InvalidRequest => {
+            Some("perform the stated prerequisite and correct the indicated argument, then retry")
+        }
+        ErrorKind::InvalidDeclaration => {
+            Some("inspect the declaration/source diagnostic, correct the source, and retry")
+        }
+        ErrorKind::QueryFailed => {
+            Some("retry with a valid query kind and target in the current Rocq context")
+        }
+    };
+    match action {
+        Some(action) => {
+            let detail = error.message.trim().trim_end_matches('.');
+            let detail = if detail.is_empty() {
+                "operation failed"
+            } else {
+                detail
+            };
+            format!("{detail}. Next step: {action}.")
+        }
+        None => error.message.clone(),
+    }
+}
+
+fn state_json(
+    state: &ProofState,
+    checkpoint: Option<CheckpointId>,
+    retained_next_offset: Option<usize>,
+) -> Value {
     let mut value = json!({
         "target": declaration_identity_json(&state.theorem.identity),
         "status": format!("{:?}", state.lifecycle),
     });
-    // Design note: an empty goal rendering carries no information after PET
-    // has reported completion (or for a hypothetical solved `try` result).
-    // Keep the wire state sparse; `try.solved` remains the explicit marker for
-    // a hypothetical terminal result because its status intentionally stays
-    // `Open` until `check` publishes it.
-    if !state.goals.is_empty() {
-        value["goals"] = json!(state.goals);
+    // Design note: `Open` is a PET lifecycle fact, not a synonym for
+    // “focused goals rendered to a non-empty string”.  Rocq can legally have
+    // an open proof with an empty focused list and work parked on the shelf or
+    // proof stack (`shelve.`, bullets, and focus commands).  Keep the field
+    // stable, even when its value is the empty rendering, and expose the
+    // structured counts/focus data PET supplied instead of making clients
+    // probe with `idtac.`.
+    if matches!(state.lifecycle, rocq_engine::ProofLifecycle::Open) {
+        let page = match retained_next_offset {
+            Some(next_offset) => json!({
+                "text": &state.goals,
+                "next_offset": next_offset,
+            }),
+            None => text_result(&state.goals, 0).expect("zero is a valid text offset"),
+        };
+        value["goals"] = page
+            .get("text")
+            .cloned()
+            .unwrap_or_else(|| Value::String(String::new()));
+        if let Some(next_offset) = page.get("next_offset") {
+            // State responses are also used by check/try, where the caller
+            // cannot supply an offset in the same request. A selected state
+            // can resume through query(goals); a hypothetical `try` state is
+            // deliberately released and therefore reports truncation without
+            // inventing a durable server-side cursor.
+            match checkpoint {
+                Some(_) => value["goals_next_offset"] = next_offset.clone(),
+                None => value["goals_truncated"] = json!(true),
+            }
+        }
+        value["goal_counts"] = json!({
+            "focused": state.goal_focus.focused.len(),
+            "unfocused": state.goal_focus.unfocused_count(),
+            "shelved": state.goal_focus.shelved.len(),
+            "given_up": state.goal_focus.given_up.len(),
+            "total": state.goal_focus.total_count(),
+        });
+        value["focus"] = focus_json(state, checkpoint.is_some());
     }
     if let Some(checkpoint) = checkpoint {
         value["checkpoint"] = json!(checkpoint.get());
+    }
+    value
+}
+
+fn focus_json(state: &ProofState, include_goal_ids: bool) -> Value {
+    let focus = &state.goal_focus;
+    let ids = |goals: &[Vec<Value>]| {
+        goals
+            .iter()
+            .map(|goal| Value::Array(goal.clone()))
+            .collect::<Vec<_>>()
+    };
+    let mut value = json!({
+        "depth": focus.focus_depth(),
+    });
+    // Goal IDs can only be dereferenced while the exact selected checkpoint
+    // remains addressable. `try` releases hypothetical PET states before it
+    // returns, so exposing their IDs would invite guaranteed `not_found`
+    // queries and needlessly inflate large alternative responses.
+    if include_goal_ids {
+        value["focused_goal_ids"] = json!(ids(&focus.focused));
+        value["stack"] = json!(
+            focus
+                .stack
+                .iter()
+                .map(|frame| json!({
+                    "left_goal_ids": ids(&frame.left),
+                    "right_goal_ids": ids(&frame.right),
+                }))
+                .collect::<Vec<_>>()
+        );
+        value["shelved_goal_ids"] = json!(ids(&focus.shelved));
+        value["given_up_goal_ids"] = json!(ids(&focus.given_up));
+    }
+    if let Some(next_bullet) = &focus.next_bullet {
+        value["next_bullet"] = json!(next_bullet);
     }
     value
 }
@@ -365,9 +518,9 @@ fn dispatch_attached(
                     runtime.invalidate_project_states(project, session, selection);
                     let state =
                         engine.validate_published(project.project(), project.actor(), &target)?;
-                    Ok(state_json(&state, None))
+                    Ok(state_json(&state, None, None))
                 }
-                OpenResult::Open(opened) => begin_proof(project, selection, opened),
+                OpenResult::Open(opened) => begin_proof(project, selection, *opened),
             }
         }
         "declare" => {
@@ -425,23 +578,33 @@ fn begin_proof(
     opened: OpenedProof,
 ) -> Result<Value, Error> {
     let state = opened.state;
-    let view = opened.view.clone();
+    let (view, goals_next_offset) = bounded_checkpoint_view(opened.view);
     commit_or_cancelled()?;
-    let checkpoint =
-        match selection
-            .checkpoints
-            .begin(opened.target, opened.state, opened.finished, opened.view)
-        {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                project
-                    .actor()
-                    .release_states(&[state])
-                    .map_err(pet_release_error)?;
-                return Err(checkpoint_error(error));
-            }
-        };
-    Ok(state_json(&view, Some(checkpoint)))
+    let checkpoint = match selection.checkpoints.begin(
+        opened.target,
+        opened.state,
+        opened.finished,
+        view,
+        goals_next_offset,
+    ) {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            project
+                .actor()
+                .release_states(&[state])
+                .map_err(pet_release_error)?;
+            return Err(checkpoint_error(error));
+        }
+    };
+    let checkpoint_view = selection
+        .checkpoints
+        .lookup(checkpoint)
+        .map_err(checkpoint_error)?;
+    Ok(state_json(
+        &checkpoint_view.view,
+        Some(checkpoint),
+        checkpoint_view.goals_next_offset,
+    ))
 }
 
 /// Reject proof replacement without touching the active checkpoint graph or
@@ -487,7 +650,9 @@ fn check(
             fragment,
             timeout,
         ) {
-            Ok(step) => {
+            Ok(mut step) => {
+                let (view, goals_next_offset) = bounded_checkpoint_view(step.view);
+                step.view = view;
                 // Validate the native terminator before committing a finished
                 // fragment. Cancellation can therefore still win without
                 // advancing the checkpoint; after commit, publication is an
@@ -513,6 +678,7 @@ fn check(
                     fragment.clone(),
                     step.finished,
                     step.view.clone(),
+                    goals_next_offset,
                 ) {
                     Ok(checkpoint) => checkpoint,
                     Err(error) => {
@@ -531,6 +697,7 @@ fn check(
                         index,
                         &step.view,
                         Some(checkpoint),
+                        goals_next_offset,
                         rejected,
                         &error,
                     ));
@@ -540,6 +707,7 @@ fn check(
                         index,
                         &step.view,
                         Some(checkpoint),
+                        goals_next_offset,
                         rejected,
                     ));
                 }
@@ -556,7 +724,7 @@ fn check(
                 ) {
                     Ok(state) => {
                         selection.checkpoints.clear();
-                        return Ok(selected_result(index, &state, None, rejected));
+                        return Ok(selected_result(index, &state, None, None, rejected));
                     }
                     Err(error) => {
                         let checkpoint = if error.kind == ErrorKind::DeclarationChanged {
@@ -566,7 +734,12 @@ fn check(
                             Some(checkpoint)
                         };
                         return Ok(selected_error(
-                            index, &step.view, checkpoint, rejected, &error,
+                            index,
+                            &step.view,
+                            checkpoint,
+                            goals_next_offset,
+                            rejected,
+                            &error,
                         ));
                     }
                 }
@@ -586,7 +759,11 @@ fn check(
         .lookup(base_id)
         .map_err(checkpoint_error)?;
     Ok(json!({
-        "state": state_json(&checkpoint.view, Some(base_id)),
+        "state": state_json(
+            &checkpoint.view,
+            Some(base_id),
+            checkpoint.goals_next_offset,
+        ),
         "rejected": rejected,
     }))
 }
@@ -595,11 +772,12 @@ fn selected_result(
     selected: usize,
     state: &ProofState,
     checkpoint: Option<CheckpointId>,
+    goals_next_offset: Option<usize>,
     rejected: Vec<Value>,
 ) -> Value {
     let mut result = json!({
         "selected": selected,
-        "state": state_json(state, checkpoint),
+        "state": state_json(state, checkpoint, goals_next_offset),
     });
     if !rejected.is_empty() {
         result["rejected"] = json!(rejected);
@@ -611,12 +789,13 @@ fn selected_error(
     selected: usize,
     state: &ProofState,
     checkpoint: Option<CheckpointId>,
+    goals_next_offset: Option<usize>,
     rejected: Vec<Value>,
     error: &Error,
 ) -> Value {
     let mut result = json!({
         "selected": selected,
-        "state": state_json(state, checkpoint),
+        "state": state_json(state, checkpoint, goals_next_offset),
         "error": public_error(error),
     });
     if !rejected.is_empty() {
@@ -656,7 +835,7 @@ fn try_fragments(
         ) {
             Ok(step) => {
                 reject_cancelled()?;
-                let state = state_json(&step.view, None);
+                let state = state_json(&step.view, None, None);
                 project
                     .actor()
                     .release_states(&[step.state])
@@ -743,7 +922,11 @@ fn rewind(
         .checkpoints
         .lookup(target)
         .map_err(checkpoint_error)?;
-    Ok(state_json(&checkpoint.view, Some(target)))
+    Ok(state_json(
+        &checkpoint.view,
+        Some(target),
+        checkpoint.goals_next_offset,
+    ))
 }
 
 fn query(
@@ -758,11 +941,67 @@ fn query(
         .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "kind is required"))?;
     match kind {
         "goals" => {
-            reject_unknown(args, &["kind"])?;
+            reject_unknown(args, &["kind", "scope", "goal_id", "offset"])?;
+            let offset = query_offset(args)?;
+            let goal_id = args.get("goal_id").map(|value| {
+                value.as_array().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidRequest,
+                        "goal_id must be a non-empty evar array returned by query(goals)",
+                    )
+                })
+            });
+            let goal_id = match goal_id {
+                None => None,
+                Some(result) => {
+                    let id = result?;
+                    if id.is_empty() {
+                        return Err(Error::new(
+                            ErrorKind::InvalidRequest,
+                            "goal_id must be a non-empty evar array returned by query(goals)",
+                        ));
+                    }
+                    Some(id.as_slice())
+                }
+            };
+            if goal_id.is_some() && args.get("scope").is_some() {
+                return Err(Error::new(
+                    ErrorKind::InvalidRequest,
+                    "scope and goal_id are mutually exclusive",
+                ));
+            }
+            // A PET evar id already identifies one goal across every current
+            // collection. Scope is only a collection selector and must not be
+            // repeated merely to retrieve a shelved or unfocused goal.
+            let scope = if goal_id.is_some() {
+                GoalScope::All
+            } else {
+                goal_scope(args)?
+            };
             let (checkpoint, state) = ensure_current_state(engine, project, selection)?;
             let proof = selection.checkpoints.proof.as_ref().unwrap();
-            let view = engine.goals(project.project(), project.actor(), &proof.target, state)?;
-            Ok(state_json(&view, Some(checkpoint)))
+            let view = engine.goals(
+                project.project(),
+                project.actor(),
+                &proof.target,
+                state,
+                scope,
+                goal_id,
+            )?;
+            let page = text_result(&view.goals, offset)?;
+            let mut result = state_json(&view, Some(checkpoint), None);
+            result
+                .as_object_mut()
+                .expect("state is an object")
+                .remove("goals_next_offset");
+            result["goals"] = page
+                .get("text")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            if let Some(next_offset) = page.get("next_offset") {
+                result["next_offset"] = next_offset.clone();
+            }
+            Ok(result)
         }
         "about" | "print" | "assumptions" | "dependencies" => {
             reject_unknown(args, &["kind", "target", "offset"])?;
@@ -780,11 +1019,19 @@ fn query(
                 "dependencies" => PetQuery::Dependencies(name),
                 _ => unreachable!(),
             };
-            // Design note: a selected proof supplies the authoritative PET
-            // context. Reopening the declaration at its source position
-            // would silently lose local hypotheses and make named queries
-            // disagree with the other queries in the same proof.
-            if selection.checkpoints.proof.is_some() {
+            // Design note: an exact match to the selected proof target may
+            // use its retained state (which is the only context that can
+            // represent an unpublished `declare`). Any other target must use
+            // its own document position; an unrelated active proof must never
+            // shadow that file. PET can keep both states in one process, and
+            // `query_at` releases only its temporary state after materializing
+            // the result; checkpoint-owned proof states remain untouched.
+            if selection
+                .checkpoints
+                .proof
+                .as_ref()
+                .is_some_and(|proof| proof.target.identity() == &identity)
+            {
                 let (_, state) = ensure_current_state(engine, project, selection)?;
                 let proof = selection.checkpoints.proof.as_ref().unwrap();
                 return text_result(
@@ -852,6 +1099,30 @@ fn query(
     }
 }
 
+fn goal_scope(args: &Value) -> Result<GoalScope, Error> {
+    let scope = match args.get("scope") {
+        None => return Ok(GoalScope::Focused),
+        Some(Value::String(scope)) => scope.as_str(),
+        Some(_) => {
+            return Err(Error::new(
+                ErrorKind::InvalidRequest,
+                "scope must be focused, unfocused, shelved, given_up, or all",
+            ));
+        }
+    };
+    match scope {
+        "focused" => Ok(GoalScope::Focused),
+        "unfocused" => Ok(GoalScope::Unfocused),
+        "shelved" => Ok(GoalScope::Shelved),
+        "given_up" => Ok(GoalScope::GivenUp),
+        "all" => Ok(GoalScope::All),
+        _ => Err(Error::new(
+            ErrorKind::InvalidRequest,
+            "scope must be focused, unfocused, shelved, given_up, or all",
+        )),
+    }
+}
+
 /// Parse the optional stateless text continuation offset. The value counts
 /// UTF-8 bytes and is validated against the materialized PET result by
 /// `text_result`; this function has no side effects.
@@ -877,7 +1148,8 @@ fn query_offset(args: &Value) -> Result<usize, Error> {
 /// fail without retaining any wrapper-side query state. The request already
 /// carries the current offset, so the response exposes only the continuation
 /// token.
-fn text_result(text: String, offset: usize) -> Result<Value, Error> {
+fn text_result(text: impl AsRef<str>, offset: usize) -> Result<Value, Error> {
+    let text = text.as_ref();
     let length = text.len();
     if offset > length || !text.is_char_boundary(offset) || (offset == length && !text.is_empty()) {
         return Err(Error::new(
@@ -897,6 +1169,24 @@ fn text_result(text: String, offset: usize) -> Result<Value, Error> {
         result["next_offset"] = json!(end);
     }
     Ok(result)
+}
+
+/// Bound the only pretty-printed goal text retained by a checkpoint.
+///
+/// PET remains the semantic owner and can regenerate the complete rendering
+/// from the checkpoint's state handle. The returned continuation is a UTF-8
+/// byte boundary accepted by `query(goals)`; no full contexts are copied into
+/// every historical checkpoint.
+fn bounded_checkpoint_view(mut state: ProofState) -> (ProofState, Option<usize>) {
+    if state.goals.len() <= QUERY_PAGE_BYTES {
+        return (state, None);
+    }
+    let mut end = QUERY_PAGE_BYTES;
+    while end > 0 && !state.goals.is_char_boundary(end) {
+        end -= 1;
+    }
+    state.goals.truncate(end);
+    (state, Some(end))
 }
 
 fn ensure_current_state(
@@ -952,7 +1242,7 @@ fn replay_checkpoint(
         .expect("checkpoint path has a proof")
         .target
         .clone();
-    let mut staged = Vec::<(CheckpointId, PetStateId, ProofState)>::new();
+    let mut staged = Vec::<(CheckpointId, PetStateId, ProofState, Option<usize>)>::new();
     let mut state;
     let start;
     if missing == 0 {
@@ -964,11 +1254,12 @@ fn replay_checkpoint(
                 .map_err(pet_release_error)?;
             return Err(Error::new(
                 ErrorKind::DeclarationChanged,
-                "PET root completion changed during replay",
+                "proof completion changed while restoring the initial checkpoint",
             ));
         }
         state = opened.state;
-        staged.push((records[0].0, opened.state, opened.view));
+        let (view, goals_next_offset) = bounded_checkpoint_view(opened.view);
+        staged.push((records[0].0, opened.state, view, goals_next_offset));
         start = 1;
     } else {
         state = records[missing - 1].1.pet_state.unwrap();
@@ -1003,7 +1294,7 @@ fn replay_checkpoint(
         if step.finished != checkpoint.finished {
             let mut states = staged
                 .iter()
-                .map(|(_, state, _)| *state)
+                .map(|(_, state, _, _)| *state)
                 .collect::<Vec<_>>();
             states.push(step.state);
             project
@@ -1012,15 +1303,16 @@ fn replay_checkpoint(
                 .map_err(pet_release_error)?;
             return Err(Error::new(
                 ErrorKind::DeclarationChanged,
-                "PET completion diverged while replaying the checkpoint",
+                "proof completion changed while restoring the checkpoint",
             ));
         }
         state = step.state;
-        staged.push((*checkpoint_id, step.state, step.view));
+        let (view, goals_next_offset) = bounded_checkpoint_view(step.view);
+        staged.push((*checkpoint_id, step.state, view, goals_next_offset));
     }
     let mut replaced = Vec::new();
     if let Some(proof) = &mut selection.checkpoints.proof {
-        for (checkpoint, state, view) in staged {
+        for (checkpoint, state, view, goals_next_offset) in staged {
             let node = proof.checkpoints.get_mut(&checkpoint).ok_or_else(|| {
                 Error::new(
                     ErrorKind::InvalidConfiguration,
@@ -1031,6 +1323,7 @@ fn replay_checkpoint(
                 replaced.push(previous);
             }
             node.view = view;
+            node.goals_next_offset = goals_next_offset;
         }
     }
     project
@@ -1042,11 +1335,11 @@ fn replay_checkpoint(
 
 fn release_staged(
     project: &ProjectRuntime,
-    staged: &[(CheckpointId, PetStateId, ProofState)],
+    staged: &[(CheckpointId, PetStateId, ProofState, Option<usize>)],
 ) -> Result<(), Error> {
     let states = staged
         .iter()
-        .map(|(_, state, _)| *state)
+        .map(|(_, state, _, _)| *state)
         .collect::<Vec<_>>();
     project
         .actor()
@@ -1132,7 +1425,12 @@ pub(crate) fn pet_release_error(error: rocq_engine::pet::PetError) -> Error {
         error if error.is_internal_failure() => ErrorKind::PetFailure,
         _ => ErrorKind::InvalidConfiguration,
     };
-    Error::new(kind, error.to_string())
+    let projected = Error::new(kind, error.public_message());
+    if error.is_semantic() {
+        projected.semantic()
+    } else {
+        projected
+    }
 }
 
 #[cfg(test)]
@@ -1177,9 +1475,9 @@ mod tests {
 
     #[test]
     fn small_text_query_preserves_the_original_wire_shape() {
-        assert_eq!(text_result("ok".into(), 0).unwrap(), json!({"text":"ok"}));
+        assert_eq!(text_result("ok", 0).unwrap(), json!({"text":"ok"}));
         assert_eq!(
-            text_result("ok".into(), 3).unwrap_err().kind,
+            text_result("ok", 3).unwrap_err().kind,
             ErrorKind::InvalidRequest
         );
         for value in [json!(-1), json!(1.5), json!("1")] {
@@ -1188,5 +1486,107 @@ mod tests {
                 ErrorKind::InvalidRequest
             );
         }
+    }
+
+    #[test]
+    fn goal_scope_defaults_to_focused_and_rejects_invalid_values() {
+        assert_eq!(goal_scope(&json!({})).unwrap(), GoalScope::Focused);
+        assert_eq!(
+            goal_scope(&json!({"scope":"shelved"})).unwrap(),
+            GoalScope::Shelved
+        );
+        for value in [json!(1), json!("unknown")] {
+            assert_eq!(
+                goal_scope(&json!({"scope":value})).unwrap_err().kind,
+                ErrorKind::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
+    fn open_state_keeps_empty_focus_and_pet_focus_metadata() {
+        let state = ProofState {
+            theorem: DeclarationInfo {
+                identity: DeclarationIdentity {
+                    file: FileId("A.v".into()),
+                    qualified_path: vec!["Demo".into(), "t".into()],
+                },
+                kind: DeclarationKind::Theorem,
+                statement: "True".into(),
+            },
+            lifecycle: rocq_engine::ProofLifecycle::Open,
+            goals: String::new(),
+            goal_focus: rocq_engine::GoalFocus {
+                focused: vec![],
+                stack: vec![rocq_engine::GoalStackFrame {
+                    left: vec![],
+                    right: vec![vec![json!("Ser_Evar"), json!(7)]],
+                }],
+                shelved: vec![],
+                given_up: vec![],
+                next_bullet: Some("Focus next goal with bullet -.".into()),
+            },
+        };
+        let value = state_json(&state, Some(CheckpointId::from_u64(3)), None);
+        assert_eq!(value["status"], "Open");
+        assert_eq!(value["goals"], "");
+        assert_eq!(value["goal_counts"]["total"], 1);
+        assert_eq!(value["focus"]["depth"], 1);
+        assert_eq!(
+            value["focus"]["next_bullet"],
+            "Focus next goal with bullet -."
+        );
+        assert_eq!(value["focus"]["stack"][0]["right_goal_ids"][0][1], 7);
+    }
+
+    #[test]
+    fn retained_and_hypothetical_goal_renderings_are_bounded_without_utf8_damage() {
+        let state = ProofState {
+            theorem: DeclarationInfo {
+                identity: DeclarationIdentity {
+                    file: FileId("A.v".into()),
+                    qualified_path: vec!["Demo".into(), "t".into()],
+                },
+                kind: DeclarationKind::Theorem,
+                statement: "True".into(),
+            },
+            lifecycle: rocq_engine::ProofLifecycle::Open,
+            goals: format!("{}🦀tail", "a".repeat(QUERY_PAGE_BYTES - 1)),
+            goal_focus: rocq_engine::GoalFocus::default(),
+        };
+        let hypothetical = state_json(&state, None, None);
+        assert_eq!(hypothetical["goals_truncated"], true);
+        assert!(hypothetical.get("goals_next_offset").is_none());
+        assert_eq!(
+            hypothetical["goals"].as_str().unwrap().len(),
+            QUERY_PAGE_BYTES - 1
+        );
+        assert_eq!(hypothetical["focus"], json!({"depth":0}));
+
+        let (retained, next_offset) = bounded_checkpoint_view(state);
+        assert_eq!(retained.goals.len(), QUERY_PAGE_BYTES - 1);
+        assert_eq!(next_offset, Some(QUERY_PAGE_BYTES - 1));
+        let selected = state_json(&retained, Some(CheckpointId::from_u64(1)), next_offset);
+        assert_eq!(selected["goals_next_offset"], QUERY_PAGE_BYTES - 1);
+        assert!(selected.get("goals_truncated").is_none());
+        assert!(selected["focus"].get("next_bullet").is_none());
+    }
+
+    #[test]
+    fn pet_sentence_diagnostic_is_structured_on_the_wire() {
+        let error = Error::new(ErrorKind::ProofStepFailed, "bad tactic")
+            .semantic()
+            .with_diagnostic(rocq_engine::ProofDiagnostic {
+                byte_start: 12,
+                byte_end: 20,
+            });
+        assert_eq!(
+            public_error(&error),
+            json!({
+                "kind":"proof_step_failed",
+                "message":"bad tactic",
+                "diagnostic":{"byte_range":{"start":12,"end":20}}
+            })
+        );
     }
 }

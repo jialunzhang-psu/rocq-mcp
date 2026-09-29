@@ -29,7 +29,7 @@ pub(crate) fn prepare(
     if !target.anchor.replaceable {
         return Err(Error::new(
             ErrorKind::InvalidDeclaration,
-            "PET source range is shared by multiple declarations",
+            "source range is shared by multiple declarations",
         ));
     }
     let path = target.anchor.source.clone();
@@ -172,7 +172,10 @@ fn restore_epoch(
     let refresh = actor.refresh_workspace(workspace).map_err(|error| {
         Error::new(
             ErrorKind::InvalidConfiguration,
-            format!("publication rollback could not refresh PET: {error}"),
+            format!(
+                "publication rollback could not refresh the project context: {}",
+                error.public_message()
+            ),
         )
     });
     match (build, refresh) {
@@ -195,7 +198,7 @@ fn replacement(
     if range.start > range.end || range.end > original.len() {
         return Err(Error::new(
             ErrorKind::DeclarationChanged,
-            "PET declaration range is invalid",
+            "declaration range is inconsistent with the current source",
         ));
     }
     let mut body = if let Some(header) = &target.new_header {
@@ -211,7 +214,7 @@ fn replacement(
         if range.start > header_end || header_end > range.end {
             return Err(Error::new(
                 ErrorKind::DeclarationChanged,
-                "PET header range is invalid",
+                "declaration header range is inconsistent with the current source",
             ));
         }
         let header = std::str::from_utf8(&original[range.start..header_end])
@@ -272,7 +275,7 @@ pub(crate) fn native_build(
         return Err(Error::new(
             ErrorKind::InvalidDeclaration,
             format!(
-                "Dune rejected the proof source: {}",
+                "proof source was rejected: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         ));
@@ -359,7 +362,12 @@ fn refresh_error(error: crate::pet::PetError) -> Error {
         error if error.is_internal_failure() => ErrorKind::PetFailure,
         _ => ErrorKind::InvalidConfiguration,
     };
-    Error::new(kind, error.to_string())
+    let projected = Error::new(kind, error.public_message());
+    if error.is_semantic() {
+        projected.semantic()
+    } else {
+        projected
+    }
 }
 
 #[cfg(test)]
@@ -399,7 +407,7 @@ mod tests {
             qualified_path: vec!["Demo".into(), "A".into(), "t".into()],
         };
         let opened = match engine.open_declaration(&project, &actor, identity).unwrap() {
-            OpenResult::Open(opened) => opened,
+            OpenResult::Open(opened) => *opened,
             OpenResult::Published(_) => panic!("fixture theorem must be open"),
         };
         Fixture {

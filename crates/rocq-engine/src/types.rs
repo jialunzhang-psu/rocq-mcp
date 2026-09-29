@@ -5,6 +5,7 @@
 //! declaration and one ephemeral PET result.
 
 use crate::pet::PetStateId;
+use serde_json::Value;
 use std::{fmt, path::PathBuf, time::Duration};
 
 /// Operator policy for external commands.
@@ -51,14 +52,40 @@ pub enum ErrorKind {
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
+    /// Optional source-relative diagnostic supplied by PET.  This is present
+    /// only for an operation whose Rocq command has a precise location; all
+    /// ordinary validation errors keep it absent.
+    pub diagnostic: Option<ProofDiagnostic>,
+    /// Whether `message` is Rocq's semantic diagnostic rather than a
+    /// wrapper/infrastructure explanation.  MCP must preserve this text
+    /// verbatim instead of appending generic recovery prose.
+    pub semantic: bool,
 }
 
 impl Error {
+    /// Construct a wrapper-owned failure.  Callers forwarding a Rocq
+    /// rejection must additionally call [`Self::semantic`] so MCP leaves its
+    /// diagnostic untouched.
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
+            diagnostic: None,
+            semantic: false,
         }
+    }
+
+    /// Attach PET's half-open UTF-8 byte range for the rejected fragment.
+    pub fn with_diagnostic(mut self, diagnostic: ProofDiagnostic) -> Self {
+        self.diagnostic = Some(diagnostic);
+        self
+    }
+
+    /// Mark this message as an authoritative Rocq semantic diagnostic.  MCP
+    /// will not append recovery prose to a marked error.
+    pub fn semantic(mut self) -> Self {
+        self.semantic = true;
+        self
     }
 }
 
@@ -69,6 +96,15 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// A byte range in the caller's proof fragment.  PET computes this from
+/// Rocq's parser/exception location; the wrapper never splits or reparses the
+/// fragment to guess where execution failed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofDiagnostic {
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProofLifecycle {
@@ -174,17 +210,65 @@ pub struct DeclarationInfo {
     pub statement: String,
 }
 
+/// One proof-stack frame as returned by PET.  The two lists must remain
+/// distinct: Rocq uses them to validate bullets and focus transitions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalStackFrame {
+    pub left: Vec<Vec<Value>>,
+    pub right: Vec<Vec<Value>>,
+}
+
+/// Lossless *identity* projection of PET's goal response.  Full hypotheses
+/// and types remain in PET and are fetched only for a bounded `query(goals)`
+/// rendering; checkpoints retain this small metadata rather than duplicating
+/// every pretty-printed context.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GoalFocus {
+    pub focused: Vec<Vec<Value>>,
+    pub stack: Vec<GoalStackFrame>,
+    pub shelved: Vec<Vec<Value>>,
+    pub given_up: Vec<Vec<Value>>,
+    pub next_bullet: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoalScope {
+    Focused,
+    Unfocused,
+    Shelved,
+    GivenUp,
+    All,
+}
+
+impl GoalFocus {
+    pub fn unfocused_count(&self) -> usize {
+        self.stack
+            .iter()
+            .map(|frame| frame.left.len() + frame.right.len())
+            .sum()
+    }
+
+    pub fn total_count(&self) -> usize {
+        self.focused.len() + self.unfocused_count() + self.shelved.len() + self.given_up.len()
+    }
+
+    pub fn focus_depth(&self) -> usize {
+        self.stack.len()
+    }
+}
+
 /// Materialized PET goal view returned to MCP. Completion is never inferred
 /// from this text; it comes from PET's `proof_finished` result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProofState {
     pub theorem: DeclarationInfo,
     pub lifecycle: ProofLifecycle,
-    pub focused_goals: usize,
-    pub unfocused_goals: usize,
-    pub shelved_goals: usize,
-    pub given_up_goals: usize,
+    /// Focused or caller-selected PET rendering. MCP bounds this before a
+    /// state is retained in a checkpoint; semantic goal data stays in PET.
     pub goals: String,
+    /// PET-owned focus/identity metadata. Full goal contexts are deliberately
+    /// not copied into every checkpoint; query(goals) asks PET for them again.
+    pub goal_focus: GoalFocus,
 }
 
 /// PET-provided byte range in the exact source snapshot. The end is exclusive.
@@ -238,7 +322,7 @@ pub struct OpenedProof {
 /// its PET-finished source form for build/trust validation.
 #[derive(Clone, Debug)]
 pub enum OpenResult {
-    Open(OpenedProof),
+    Open(Box<OpenedProof>),
     /// PET reports a proved terminal declaration. The MCP project coordinator
     /// must perform the Dune-build/PET-refresh epoch transition before
     /// exposing it as `Completed`.

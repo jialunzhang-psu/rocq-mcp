@@ -56,6 +56,8 @@ pub fn tool_definitions() -> &'static [Tool] {
                 "at": declaration_id,
                 "expression": s,
                 "pattern": s,
+                "scope": {"enum": ["focused", "unfocused", "shelved", "given_up", "all"]},
+                "goal_id": {"type":"array", "minItems":1},
                 "offset": {"type":"integer","minimum":0},
             }),
             &["kind"],

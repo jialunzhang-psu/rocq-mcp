@@ -26,6 +26,9 @@ pub(crate) struct Checkpoint {
     pub(crate) accepted_input: Option<String>,
     pub(crate) finished: bool,
     pub(crate) view: ProofState,
+    /// UTF-8 continuation for the bounded focused rendering retained in
+    /// `view`. This is MCP transport state, never engine/PET semantics.
+    pub(crate) goals_next_offset: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +60,7 @@ impl CheckpointBook {
         state: PetStateId,
         finished: bool,
         view: ProofState,
+        goals_next_offset: Option<usize>,
     ) -> Result<CheckpointId, CheckpointError> {
         if self.proof.is_some() {
             return Err(CheckpointError::ActiveProof);
@@ -68,6 +72,7 @@ impl CheckpointBook {
             accepted_input: None,
             finished,
             view,
+            goals_next_offset,
         };
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(id, root);
@@ -85,6 +90,7 @@ impl CheckpointBook {
         input: String,
         finished: bool,
         view: ProofState,
+        goals_next_offset: Option<usize>,
     ) -> Result<CheckpointId, CheckpointError> {
         let id = self.allocate()?;
         let proof = self.proof.as_mut().ok_or(CheckpointError::NoActiveProof)?;
@@ -97,6 +103,7 @@ impl CheckpointBook {
                 accepted_input: Some(input),
                 finished,
                 view,
+                goals_next_offset,
             },
         );
         proof.current = id;

@@ -8,8 +8,9 @@ are workspace-relative `FileId` values; declarations are PET-backed
 `DeclarationId` objects. A declaration listing has an id, kind, and statement;
 the qualified name is already encoded by the id. Proof status is supplied by
 PET-backed proof operations. A proof state has the exact reusable `target`
-`DeclarationId` and `status`; a nonterminal open state additionally has
-`goals`, and an open selected state also has a session-local integer
+`DeclarationId` and `status`; every `Open` state additionally has `goals`,
+`goal_counts`, and `focus` (the rendering may be empty when Rocq has parked
+all goals). An open selected state also has a session-local integer
 `checkpoint`. Status is `Open` or `Completed`; proof states do not duplicate
 the target as a string or repeat its source statement.
 `Completed` is returned only after PET reports a proved terminal AST, Dune/Rocq
@@ -25,7 +26,19 @@ first refreshes the typed Dune view and can therefore return
 operation-specific cases and repeat those common errors where useful. `check`
 and `try` can also return errors *inside* their result, preserving
 ordered-alternative diagnostics without turning a rejected proof fragment into
-a protocol failure.
+a protocol failure. When Rocq attaches a precise location to a rejected proof
+fragment, the error also carries
+`"diagnostic":{"byte_range":{"start":N,"end":M}}`. The half-open offsets are
+UTF-8 bytes in that exact fragment, are computed by PET from Rocq's exception
+range, and are never guessed by splitting on periods in the wrapper.
+
+For a semantic rejection, `message` is Rocq's diagnostic verbatim (and may
+include the diagnostic range); the server does not replace it with a generic
+explanation. For a request, Dune, transport, lifecycle, or other
+infrastructure failure, `message` contains a concrete `Next step:` telling the
+caller what to retry, inspect, or reconfigure. Public messages do not expose
+the prover implementation name or JSON-RPC numeric error codes; those details
+remain internal diagnostics only.
 
 `pet_lost` means the in-flight PET request lost its child or JSON-RPC
 transport. The server does not blindly repeat that request because a pipe can
@@ -108,13 +121,17 @@ each returned ID, and the qualified name is not duplicated as a second string.
 ## `query`
 
 The query variant is `args.kind`; there is no `request` wrapper.
-`goals` takes no other fields. `about`, `print`, `assumptions`, and
+`goals` accepts optional `scope`, `goal_id`, and `offset` fields. `scope` is
+`focused` (the default), `unfocused`, `shelved`, `given_up`, or `all`;
+`goal_id` is one of PET's evar arrays returned in `focus` and selects that
+goal across all collections; `scope` and `goal_id` are mutually exclusive.
+`offset` continues the bounded UTF-8 rendering. `about`, `print`, `assumptions`, and
 `dependencies` require `target` as a `DeclarationId`. `type` and `notations`
 require `expression`. `search` requires a Rocq Search pattern. `search`,
 `type`, and `notations` accept an optional `at` `DeclarationId` selecting an
 explicit original PET source context.
 Every text-returning variant accepts an optional non-negative `offset` for
-resuming a bounded result; `goals` does not.
+resuming a bounded result, including `goals`.
 Do not mix fields from different variants.
 
 ```json
@@ -132,21 +149,44 @@ Do not mix fields from different variants.
 `search`, `about`, and `print` execute Rocq `Search`, `About`, and `Print`
 directly through PET; they are not wrapper metadata projections. `print`
 returns Rocq's printed term, not the original tactic script. `goals` returns a
-proof state. Other variants return
+proof state with PET-owned observability: `goals` is always present for an
+open state (possibly `""`), `goal_counts` reports focused/unfocused/shelved/
+given-up/total counts, and `focus` reports the stack depth, PET's raw
+`next_bullet` suggestion, and—for a selected checkpoint—epoch-scoped goal IDs
+for each stack side. Hypothetical `try` states have already been released and
+therefore omit unusable goal IDs while retaining counts, depth, and any bullet
+suggestion. A
+`goal_id` query renders exactly one goal; `scope:"all"` renders every PET
+collection through the same pager. State responses cap the focused rendering
+at 32 KiB. A selected state exposes `goals_next_offset` when it can be resumed
+with a `query(kind:"goals", offset:...)` call. A hypothetical `try` state is
+released immediately, so an oversized one instead exposes
+`goals_truncated:true`; commit the candidate with `check` before paging it.
+`next_bullet` is present only when PET supplies a suggestion. These fields are
+snapshots, not guesses from rendered text. Other variants return
 `{"text":"<Rocq output>"}` when the complete result fits in 32 KiB. Larger
 results are split at UTF-8 boundaries and return
 `{"text":"...","next_offset":K}` when another page exists. Pass the
 returned `next_offset` unchanged as the next request's `offset`; the last page
-omits `next_offset`. Offsets count raw UTF-8 bytes, and callers must not invent
-or adjust them. Paging is stateless: PET recomputes the same semantic query,
+omits `next_offset`. Repeat the same `scope` or `goal_id` selector on every
+page. Offsets count raw UTF-8 bytes, and callers must not invent or adjust
+them. Paging is stateless: PET recomputes the same semantic query,
 while the wrapper only slices its materialized text and stores no cursor. With a
 selected open proof and no `at`, `search`, `type`, and `notations` run in that
 proof's current replayed context. An explicit `at` always wins, even while a
 proof is active, and runs after that declaration in its original source file.
 Without either an active proof or `at`, those variants are rejected. The
-wrapper never chooses a first file or library implicitly. With an active
-proof, named queries also run in that proof's current PET state; without one
-they run after their target declaration, not in a synthetic theorem. Before returning cached
+wrapper never chooses a first file or library implicitly. An explicit `target`
+determines the document context for `about`, `print`, `assumptions`, and
+`dependencies` whenever it differs from the selected proof; the target's
+temporary post-declaration PET state is released after the result is
+materialized. This releases only the exported snapshot handle—not PET's
+process, workspace, or checked-document cache—and allows declarations in files
+that are not imported by the active proof to be queried in the same PET
+instance without growing wrapper-owned state. When `target` exactly
+matches the selected proof, the retained proof state is used so unpublished
+`declare` targets remain queryable. `search`, `type`, and `notations` use the
+active proof only when no explicit `at` is supplied. Before returning cached
 goals, the server revalidates the declaration's source digest and Dune source
 selection; a changed or malformed environment is reported instead of exposing
 stale PET state.
@@ -251,7 +291,8 @@ Accepts 1–20 ordered proof fragments; each fragment may contain one or more
 Rocq sentences. Every fragment starts from the same selected state. The first
 fragment whose every sentence PET accepts is committed, and later fragments
 are not evaluated. A rejected multi-sentence fragment is atomic: none of its
-accepted prefix is appended.
+accepted prefix is appended. If Rocq identifies the failing command, that
+entry's error contains its PET-provided fragment-relative byte range.
 
 `selected` is the zero-based winning input index. `rejected` contains the
 ordered errors before it and is omitted when empty. Results have these sparse
@@ -317,8 +358,9 @@ Returns accepted entries as
 `{"solved":false,"error":<error>}` in input order. A rejected fragment
 exposes no partial-prefix state and has its own `proof_step_failed` or other
 typed error. Hypothetical states never contain a checkpoint; a solved
-hypothetical state omits its empty `goals` field, while `solved:true` remains
-the explicit indication that the fragment would close the proof.
+hypothetical state is still an `Open` view and therefore contains
+`goals:""`, while `solved:true` remains the explicit indication that the
+fragment would close the proof if committed.
 `timeout_ms` has the same per-fragment semantics as `check`. A timed-out entry
 is returned with `solved:false` and a `proof_step_timeout` error; later entries
 still run independently after the original checkpoint is replayed.

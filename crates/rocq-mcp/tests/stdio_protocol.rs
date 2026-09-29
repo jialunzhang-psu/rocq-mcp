@@ -226,6 +226,10 @@ fn missing_search_reference_is_not_configuration_and_keeps_the_proof_live() {
             .as_str()
             .is_some_and(|message| message.contains("pt_generated"))
     );
+    let missing_message = missing["structuredContent"]["message"].as_str().unwrap();
+    assert!(!missing_message.contains("PET"), "{missing_message}");
+    assert!(!missing_message.contains("-32008"), "{missing_message}");
+    assert!(!missing_message.contains("Next step:"), "{missing_message}");
 
     let malformed = call_tool(
         &mut input,
@@ -346,6 +350,8 @@ fn transport_loss_keeps_attachment_replays_trace_and_allows_retirement() {
     let message = lost["structuredContent"]["message"].as_str().unwrap();
     assert!(message.contains("Broken pipe"), "{message}");
     assert!(message.contains("signal: 9 (SIGKILL)"), "{message}");
+    assert!(message.contains("Next step:"), "{message}");
+    assert!(!message.contains("PET"), "{message}");
 
     // No second `start` or `prove`: the connection attachment and checkpoint
     // text survived, so the next safe operation replaces PET and replays the
@@ -388,7 +394,9 @@ fn transport_loss_keeps_attachment_replays_trace_and_allows_retirement() {
         serde_json::json!({"kind":"goals"}),
     );
     assert_eq!(no_proof["structuredContent"]["kind"], "invalid_request");
-    assert_eq!(no_proof["structuredContent"]["message"], "call prove first");
+    let no_proof_message = no_proof["structuredContent"]["message"].as_str().unwrap();
+    assert!(no_proof_message.starts_with("call prove first"));
+    assert!(no_proof_message.contains("Next step:"));
 
     // The same retirement rule applies to abandon: loss means the old IDs no
     // longer exist, so abandonment succeeds and a replacement remains usable.
@@ -917,10 +925,11 @@ fn rewind_uses_monotonic_request_checkpoints_and_preserves_branches() {
     );
     let after_complete = call_tool(&mut input, &mut output, 25, "rewind", serde_json::json!({}));
     assert_eq!(after_complete["isError"], true);
-    assert_eq!(
-        after_complete["structuredContent"]["message"],
-        "call prove first"
-    );
+    let after_complete_message = after_complete["structuredContent"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(after_complete_message.starts_with("call prove first"));
+    assert!(after_complete_message.contains("Next step:"));
     drop(input);
     assert!(child.wait().unwrap().success());
 }
@@ -1146,17 +1155,24 @@ fn type_query_uses_selected_proof_unless_explicit_at_overrides_it() {
         serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
     )
     .unwrap();
+    let started = call_tool(
+        &mut input,
+        &mut output,
+        2,
+        "start",
+        serde_json::json!({"project_path":project.path()}),
+    );
+    assert_eq!(started["isError"], false, "{started}");
+    let proved = call_tool(
+        &mut input,
+        &mut output,
+        3,
+        "prove",
+        serde_json::json!({"target":{"file":"B.v","qualified_path":["Demo","B","t"]}}),
+    );
+    assert_eq!(proved["isError"], false, "{proved}");
+    let active_checkpoint = proved["structuredContent"]["checkpoint"].clone();
     for (id, name, arguments) in [
-        (
-            2,
-            "start",
-            serde_json::json!({"project_path":project.path()}),
-        ),
-        (
-            3,
-            "prove",
-            serde_json::json!({"target":{"file":"B.v","qualified_path":["Demo","B","t"]}}),
-        ),
         (
             4,
             "query",
@@ -1204,7 +1220,43 @@ fn type_query_uses_selected_proof_unless_explicit_at_overrides_it() {
                 .is_empty()
         );
     }
-    for (id, kind) in [(8, "statement"), (9, "proof"), (10, "definition")] {
+    // Named queries must honor the requested target file even while B.v's
+    // proof is selected. A.v is intentionally not imported by B.v.
+    let other_target = serde_json::json!({
+        "file":"A.v",
+        "qualified_path":["Demo","A","first"]
+    });
+    for (id, kind) in [
+        (11, "about"),
+        (12, "print"),
+        (13, "assumptions"),
+        (14, "dependencies"),
+    ] {
+        let response = call_tool(
+            &mut input,
+            &mut output,
+            id,
+            "query",
+            serde_json::json!({"kind":kind,"target":other_target.clone()}),
+        );
+        assert_eq!(response["isError"], false, "{kind}: {response}");
+        assert!(
+            response["structuredContent"]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "{kind}: {response}"
+        );
+    }
+    let goals = call_tool(
+        &mut input,
+        &mut output,
+        15,
+        "query",
+        serde_json::json!({"kind":"goals"}),
+    );
+    assert_eq!(goals["isError"], false, "{goals}");
+    assert_eq!(goals["structuredContent"]["checkpoint"], active_checkpoint);
+    for (id, kind) in [(16, "statement"), (17, "proof"), (18, "definition")] {
         let response = call_tool(
             &mut input,
             &mut output,
@@ -1336,5 +1388,327 @@ fn abandon_discards_an_open_declaration_and_allows_redeclaration() {
     assert_eq!(
         fs::read_to_string(project.path().join("Main.v")).unwrap(),
         "Definition base := 0.\n"
+    );
+}
+
+#[test]
+fn proof_observability_preserves_pet_focus_ranges_and_bounded_goal_pages() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    let many_goal = (0..80)
+        .map(|index| format!("P {index}"))
+        .collect::<Vec<_>>()
+        .join(" /\\ ");
+    let large_context = (1000..1120)
+        .map(|index| format!("P {index}"))
+        .collect::<Vec<_>>()
+        .join(" /\\ ");
+    let source = format!(
+        "Theorem shelved : True. Admitted.\n\
+         Theorem branched : True /\\ True. Admitted.\n\
+         Theorem diagnostic : True. Admitted.\n\
+         Theorem many (P : nat -> Prop) (H : {large_context}) : {many_goal}. Admitted.\n"
+    );
+    fs::write(project.path().join("A.v"), &source).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0", "id":1, "method":"initialize",
+            "params":{"protocolVersion":"2025-11-25","capabilities":{},
+                      "clientInfo":{"name":"observability-test","version":"1"}}
+        })
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+        1
+    );
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    let started = call_tool(
+        &mut input,
+        &mut output,
+        2,
+        "start",
+        serde_json::json!({"project_path":project.path()}),
+    );
+    assert_eq!(started["isError"], false, "{started}");
+    let target = |leaf: &str| serde_json::json!({"file":"A.v","qualified_path":["Demo","A",leaf]});
+
+    let shelved = target("shelved");
+    let opened = call_tool(
+        &mut input,
+        &mut output,
+        3,
+        "prove",
+        serde_json::json!({"target":shelved.clone()}),
+    );
+    assert_eq!(opened["isError"], false, "{opened}");
+    let parked = call_tool(
+        &mut input,
+        &mut output,
+        4,
+        "check",
+        serde_json::json!({"attempts":["shelve."]}),
+    );
+    assert_eq!(parked["isError"], false, "{parked}");
+    let parked = &parked["structuredContent"]["state"];
+    assert_eq!(parked["status"], "Open");
+    assert_eq!(parked["goals"], "");
+    assert_eq!(parked["goal_counts"]["focused"], 0);
+    assert_eq!(parked["goal_counts"]["shelved"], 1);
+    assert_eq!(parked["goal_counts"]["total"], 1);
+    let shelved_id = parked["focus"]["shelved_goal_ids"][0].clone();
+    let shelved_scope = call_tool(
+        &mut input,
+        &mut output,
+        5,
+        "query",
+        serde_json::json!({"kind":"goals","scope":"shelved"}),
+    );
+    assert_eq!(shelved_scope["isError"], false, "{shelved_scope}");
+    assert!(
+        shelved_scope["structuredContent"]["goals"]
+            .as_str()
+            .unwrap()
+            .contains("True")
+    );
+    let by_id = call_tool(
+        &mut input,
+        &mut output,
+        6,
+        "query",
+        serde_json::json!({"kind":"goals","goal_id":shelved_id.clone()}),
+    );
+    assert_eq!(by_id["isError"], false, "{by_id}");
+    assert!(
+        by_id["structuredContent"]["goals"]
+            .as_str()
+            .unwrap()
+            .contains("True")
+    );
+    let conflicting_selector = call_tool(
+        &mut input,
+        &mut output,
+        7,
+        "query",
+        serde_json::json!({"kind":"goals","scope":"all","goal_id":shelved_id}),
+    );
+    assert_eq!(
+        conflicting_selector["isError"], true,
+        "{conflicting_selector}"
+    );
+    assert_eq!(
+        conflicting_selector["structuredContent"]["kind"],
+        "invalid_request"
+    );
+    let abandoned = call_tool(
+        &mut input,
+        &mut output,
+        8,
+        "abandon",
+        serde_json::json!({"target":shelved}),
+    );
+    assert_eq!(abandoned["isError"], false, "{abandoned}");
+
+    let branched = target("branched");
+    for (id, name, arguments) in [
+        (9, "prove", serde_json::json!({"target":branched.clone()})),
+        (10, "check", serde_json::json!({"attempts":["split."]})),
+    ] {
+        let result = call_tool(&mut input, &mut output, id, name, arguments);
+        assert_eq!(result["isError"], false, "{name}: {result}");
+    }
+    let focused = call_tool(
+        &mut input,
+        &mut output,
+        11,
+        "check",
+        serde_json::json!({"attempts":["- exact I."]}),
+    );
+    assert_eq!(focused["isError"], false, "{focused}");
+    let focused = &focused["structuredContent"]["state"];
+    assert_eq!(focused["status"], "Open");
+    assert_eq!(focused["goals"], "");
+    assert_eq!(focused["goal_counts"]["focused"], 0);
+    assert_eq!(focused["goal_counts"]["unfocused"], 1);
+    assert!(focused["focus"]["depth"].as_u64().unwrap() >= 1);
+    assert!(
+        focused["focus"]["next_bullet"]
+            .as_str()
+            .unwrap()
+            .contains('-')
+    );
+    let unfocused_id = focused["focus"]["stack"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|frame| {
+            frame["left_goal_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(frame["right_goal_ids"].as_array().unwrap().iter())
+        })
+        .next()
+        .unwrap()
+        .clone();
+    let unfocused = call_tool(
+        &mut input,
+        &mut output,
+        12,
+        "query",
+        serde_json::json!({"kind":"goals","goal_id":unfocused_id}),
+    );
+    assert_eq!(unfocused["isError"], false, "{unfocused}");
+    assert!(
+        unfocused["structuredContent"]["goals"]
+            .as_str()
+            .unwrap()
+            .contains("True")
+    );
+    assert_eq!(
+        call_tool(
+            &mut input,
+            &mut output,
+            13,
+            "abandon",
+            serde_json::json!({"target":branched}),
+        )["isError"],
+        false
+    );
+
+    let diagnostic = target("diagnostic");
+    let opened = call_tool(
+        &mut input,
+        &mut output,
+        14,
+        "prove",
+        serde_json::json!({"target":diagnostic.clone()}),
+    );
+    let diagnostic_checkpoint = opened["structuredContent"]["checkpoint"].clone();
+    let rejected = call_tool(
+        &mut input,
+        &mut output,
+        15,
+        "check",
+        serde_json::json!({"attempts":["idtac \"🦀\". nonsense."]}),
+    );
+    assert_eq!(rejected["isError"], false, "{rejected}");
+    let rejected = &rejected["structuredContent"];
+    assert_eq!(rejected["state"]["checkpoint"], diagnostic_checkpoint);
+    assert_eq!(rejected["rejected"][0]["kind"], "proof_step_failed");
+    assert_eq!(
+        rejected["rejected"][0]["diagnostic"]["byte_range"],
+        serde_json::json!({"start":14,"end":22})
+    );
+    assert_eq!(
+        call_tool(
+            &mut input,
+            &mut output,
+            16,
+            "abandon",
+            serde_json::json!({"target":diagnostic}),
+        )["isError"],
+        false
+    );
+
+    let many = target("many");
+    let opened = call_tool(
+        &mut input,
+        &mut output,
+        17,
+        "prove",
+        serde_json::json!({"target":many.clone()}),
+    );
+    assert_eq!(opened["isError"], false, "{opened}");
+    let hypothetical = call_tool(
+        &mut input,
+        &mut output,
+        18,
+        "try",
+        serde_json::json!({"attempts":["repeat split."]}),
+    );
+    assert_eq!(hypothetical["isError"], false, "{hypothetical}");
+    let hypothetical = &hypothetical["structuredContent"]["attempts"][0]["state"];
+    assert_eq!(hypothetical["goals_truncated"], true);
+    assert!(hypothetical.get("goals_next_offset").is_none());
+    assert!(hypothetical["goals"].as_str().unwrap().len() <= 32 * 1024);
+    let committed = call_tool(
+        &mut input,
+        &mut output,
+        19,
+        "check",
+        serde_json::json!({"attempts":["repeat split."]}),
+    );
+    assert_eq!(committed["isError"], false, "{committed}");
+    let state = &committed["structuredContent"]["state"];
+    assert_eq!(state["goal_counts"]["focused"], 80);
+    assert_eq!(state["goal_counts"]["total"], 80);
+    assert_eq!(
+        state["focus"]["focused_goal_ids"].as_array().unwrap().len(),
+        80
+    );
+    let mut rendered = state["goals"].as_str().unwrap().to_owned();
+    let mut offset = state["goals_next_offset"].as_u64().unwrap();
+    let mut request_id = 20;
+    loop {
+        let page = call_tool(
+            &mut input,
+            &mut output,
+            request_id,
+            "query",
+            serde_json::json!({"kind":"goals","offset":offset}),
+        );
+        request_id += 1;
+        assert_eq!(page["isError"], false, "{page}");
+        let page = &page["structuredContent"];
+        rendered.push_str(page["goals"].as_str().unwrap());
+        let Some(next) = page.get("next_offset").and_then(serde_json::Value::as_u64) else {
+            break;
+        };
+        assert!(next > offset);
+        offset = next;
+    }
+    assert!(rendered.len() > 32 * 1024);
+    assert!(rendered.contains("P 0"), "missing first goal");
+    assert!(rendered.contains("P 79"), "missing last goal");
+    let abandoned = call_tool(
+        &mut input,
+        &mut output,
+        request_id,
+        "abandon",
+        serde_json::json!({"target":many}),
+    );
+    assert_eq!(abandoned["isError"], false, "{abandoned}");
+
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        fs::read_to_string(project.path().join("A.v")).unwrap(),
+        source
     );
 }

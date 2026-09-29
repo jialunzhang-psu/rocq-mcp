@@ -174,11 +174,11 @@ impl Engine {
         if !target.anchor.replaceable {
             return Err(Error::new(
                 ErrorKind::InvalidDeclaration,
-                "declaration shares one PET source command with another declaration",
+                "declaration shares one source command with another declaration",
             ));
         }
         self.open_target(project, actor, target)
-            .map(OpenResult::Open)
+            .map(|opened| OpenResult::Open(Box::new(opened)))
     }
 
     /// Validate a new declaration header at PET's exact module insertion state.
@@ -233,7 +233,7 @@ impl Engine {
         if insertion > bytes.len() {
             return Err(Error::new(
                 ErrorKind::InvalidConfiguration,
-                "PET insertion range is invalid",
+                "declaration insertion metadata is invalid",
             ));
         }
         let header = format!("{} {} : {}", kind.keyword(), leaf, statement);
@@ -321,7 +321,7 @@ impl Engine {
                 if error.kind == ErrorKind::NotFound {
                     Error::new(
                         ErrorKind::DeclarationChanged,
-                        "target identity changed in the current Dune/PET context",
+                        "target identity changed in the current project context",
                     )
                 } else {
                     error
@@ -360,7 +360,7 @@ impl Engine {
                 .map_err(step_pet_error)?;
             return Err(Error::new(
                 ErrorKind::ProofStepFailed,
-                "PET rejected a proof-closing, global, or goal-giving-up fragment",
+                "fragment closes proof mode, runs a global command, or gives up a goal",
             ));
         }
         Ok(ProofStep {
@@ -376,16 +376,24 @@ impl Engine {
         actor: &pet::PetActor,
         target: &DeclarationTarget,
         state: pet::PetStateId,
+        scope: GoalScope,
+        goal_id: Option<&[serde_json::Value]>,
     ) -> Result<ProofState> {
         self.validate_target(project, target)?;
         let goals = actor.goals(state).map_err(step_pet_error)?;
         if !goals.proof_mode {
             return Err(Error::new(
                 ErrorKind::NotFound,
-                "PET proof state is no longer open",
+                "proof state is no longer open",
             ));
         }
-        Ok(proof_state(target.info.clone(), &goals))
+        let rendered = render_goals(&goals, scope, goal_id)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "goal_id is not in this state"))?;
+        Ok(proof_state_with_rendering(
+            target.info.clone(),
+            &goals,
+            rendered,
+        ))
     }
 
     /// Run a semantic query in a caller-owned proof state.
@@ -403,6 +411,12 @@ impl Engine {
 
     /// Run a semantic query after one exact source declaration, releasing the
     /// temporary context state before returning.
+    ///
+    /// `release_states` drops only the exported immutable snapshot handle. It
+    /// does not unload the PET process, workspace, or PET's checked-document
+    /// cache, so querying another file in the same project still uses the
+    /// same actor and loaded Dune environment. Keeping this one-shot context
+    /// alive would add wrapper-owned state without changing query semantics.
     pub fn query_at(
         &self,
         project: &DuneProject,
@@ -464,7 +478,7 @@ impl Engine {
                 if !resolved.proof_finished {
                     return Err(Error::new(
                         ErrorKind::InvalidDeclaration,
-                        "built declaration is not a completed PET proof",
+                        "built declaration is not a completed proof",
                     ));
                 }
                 let current = resolved.target.ok_or_else(|| {
@@ -491,19 +505,19 @@ impl Engine {
         self.validate_target(project, target)?;
         let closed = actor
             .run(final_state, target.info.kind.terminator())
-            .map_err(step_pet_error)?;
+            .map_err(finalizer_pet_error)?;
         if closed.goals.proof_mode || !closed.proof_finished {
             actor
                 .release_states(&[closed.state])
-                .map_err(step_pet_error)?;
+                .map_err(finalizer_pet_error)?;
             return Err(Error::new(
                 ErrorKind::ProofStepFailed,
-                "PET did not close the proof",
+                "the generated proof terminator did not close the proof",
             ));
         }
         actor
             .release_states(&[closed.state])
-            .map_err(step_pet_error)
+            .map_err(finalizer_pet_error)
     }
 
     /// Publish one already-finalized linear MCP checkpoint path. The caller
@@ -529,7 +543,7 @@ impl Engine {
                 if !resolved.proof_finished {
                     return Err(Error::new(
                         ErrorKind::InvalidDeclaration,
-                        "written declaration is not a completed PET proof",
+                        "written declaration is not a completed proof",
                     ));
                 }
                 let current = resolved.target.ok_or_else(|| {
@@ -638,7 +652,7 @@ impl Engine {
             {
                 return Err(Error::new(
                     ErrorKind::InvalidConfiguration,
-                    "PET returned invalid declaration metadata",
+                    "declaration metadata is inconsistent with the selected source bytes",
                 ));
             }
         }
@@ -653,7 +667,7 @@ impl Engine {
                     return Err(Error::new(
                         ErrorKind::InvalidConfiguration,
                         format!(
-                            "PET declaration path '{}' disagrees with Dune compilation unit '{}'",
+                            "declaration path '{}' disagrees with Dune compilation unit '{}'",
                             row.qualified_path.join("."),
                             library.0.join("."),
                         ),
@@ -666,7 +680,7 @@ impl Engine {
                 if !identities.insert(identity.clone()) {
                     return Err(Error::new(
                         ErrorKind::Ambiguous,
-                        "PET declaration identity is ambiguous",
+                        "declaration identity is ambiguous",
                     ));
                 }
                 let kind = declaration_kind(&row.kind);
@@ -710,7 +724,12 @@ impl Engine {
         self.declarations(project, actor, &identity.file)?
             .into_iter()
             .find(|candidate| &candidate.identity == identity)
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, "declaration was not returned by PET"))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::NotFound,
+                    "declaration is not present in the selected source context",
+                )
+            })
     }
 
     fn audit_target(
@@ -795,7 +814,7 @@ impl Engine {
                 .ok_or_else(|| {
                     Error::new(
                         ErrorKind::AxiomDependencyOutOfScope,
-                        format!("PET could not classify axiom dependency: {canonical}"),
+                        format!("could not classify axiom dependency: {canonical}"),
                     )
                 })?;
             if !declaration.explicit_axiom {
@@ -952,21 +971,28 @@ fn require_open_proof(execution: &pet::PetExecution) -> Result<()> {
     if !execution.goals.proof_mode || !execution.goals.given_up.is_empty() {
         return Err(Error::new(
             ErrorKind::InvalidDeclaration,
-            "PET did not open a safe proof state",
+            "the declaration did not open a safe proof state",
         ));
     }
     Ok(())
 }
 
 fn proof_state(info: DeclarationInfo, goals: &pet::PetGoals) -> ProofState {
+    let rendered = render_goals(goals, GoalScope::Focused, None)
+        .expect("rendering all focused PET goals cannot miss an id");
+    proof_state_with_rendering(info, goals, rendered)
+}
+
+fn proof_state_with_rendering(
+    info: DeclarationInfo,
+    goals: &pet::PetGoals,
+    rendered: String,
+) -> ProofState {
     ProofState {
         theorem: info,
         lifecycle: ProofLifecycle::Open,
-        focused_goals: goals.focused.len(),
-        unfocused_goals: goals.unfocused.len(),
-        shelved_goals: goals.shelved.len(),
-        given_up_goals: goals.given_up.len(),
-        goals: render_goals(goals),
+        goals: rendered,
+        goal_focus: goals.focus(),
     }
 }
 
@@ -987,33 +1013,69 @@ fn completed_state(info: DeclarationInfo) -> ProofState {
     ProofState {
         theorem: info,
         lifecycle: ProofLifecycle::Completed,
-        focused_goals: 0,
-        unfocused_goals: 0,
-        shelved_goals: 0,
-        given_up_goals: 0,
         goals: String::new(),
+        goal_focus: GoalFocus::default(),
     }
 }
 
-fn render_goals(goals: &pet::PetGoals) -> String {
-    let mut rendered = Vec::new();
-    for (index, goal) in goals.focused.iter().enumerate() {
-        let mut lines = Vec::new();
-        if let Some(name) = &goal.name {
-            lines.push(format!("goal {} ({name})", index + 1));
-        }
-        for hypothesis in &goal.hypotheses {
-            let names = hypothesis.names.join(" ");
-            match &hypothesis.definition {
-                Some(value) => lines.push(format!("{names} := {value} : {}", hypothesis.ty)),
-                None => lines.push(format!("{names} : {}", hypothesis.ty)),
-            }
-        }
-        lines.push("============================".into());
-        lines.push(goal.ty.clone());
-        rendered.push(lines.join("\n"));
+/// Render PET's structured goals without interpreting Rocq syntax.
+///
+/// `scope` chooses which PET-owned collections participate. If `goal_id` is
+/// present, exactly the matching goal in that scope is rendered; absence is
+/// reported with `None`. The wrapper preserves the historical focused-goal
+/// text format and never derives proof completion from this projection.
+fn render_goals(
+    goals: &pet::PetGoals,
+    scope: GoalScope,
+    goal_id: Option<&[serde_json::Value]>,
+) -> Option<String> {
+    let mut selected = Vec::new();
+    if matches!(scope, GoalScope::Focused | GoalScope::All) {
+        selected.extend(goals.focused.iter());
     }
-    rendered.join("\n\n")
+    if matches!(scope, GoalScope::Unfocused | GoalScope::All) {
+        for frame in &goals.stack {
+            selected.extend(frame.left.iter());
+            selected.extend(frame.right.iter());
+        }
+    }
+    if matches!(scope, GoalScope::Shelved | GoalScope::All) {
+        selected.extend(goals.shelved.iter());
+    }
+    if matches!(scope, GoalScope::GivenUp | GoalScope::All) {
+        selected.extend(goals.given_up.iter());
+    }
+    if let Some(goal_id) = goal_id {
+        let goal = selected
+            .into_iter()
+            .find(|goal| goal.evar.as_slice() == goal_id)?;
+        return Some(render_goal(goal, 0));
+    }
+    Some(
+        selected
+            .into_iter()
+            .enumerate()
+            .map(|(index, goal)| render_goal(goal, index))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
+fn render_goal(goal: &pet::PetGoal, index: usize) -> String {
+    let mut lines = Vec::new();
+    if let Some(name) = &goal.name {
+        lines.push(format!("goal {} ({name})", index + 1));
+    }
+    for hypothesis in &goal.hypotheses {
+        let names = hypothesis.names.join(" ");
+        match &hypothesis.definition {
+            Some(value) => lines.push(format!("{names} := {value} : {}", hypothesis.ty)),
+            None => lines.push(format!("{names} : {}", hypothesis.ty)),
+        }
+    }
+    lines.push("============================".into());
+    lines.push(goal.ty.clone());
+    lines.join("\n")
 }
 
 /// Public-facing operation context for projecting a PET remote error.  PET's
@@ -1063,7 +1125,7 @@ fn declaration_pet_error(error: pet::PetError) -> Error {
         pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
         pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
-    Error::new(kind, error.to_string())
+    projected_pet_error(kind, error, false)
 }
 
 fn step_pet_error(error: pet::PetError) -> Error {
@@ -1077,7 +1139,16 @@ fn step_pet_error(error: pet::PetError) -> Error {
         pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
         pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
-    Error::new(kind, error.to_string())
+    projected_pet_error(kind, error, true)
+}
+
+/// The closing command is generated by the wrapper rather than supplied by
+/// the caller. Preserve its typed failure class/message but do not mislabel a
+/// `Qed.`/`Defined.` range as a location in the accepted proof fragment.
+fn finalizer_pet_error(error: pet::PetError) -> Error {
+    let mut projected = step_pet_error(error);
+    projected.diagnostic = None;
+    projected
 }
 
 fn query_pet_error(error: pet::PetError) -> Error {
@@ -1091,7 +1162,23 @@ fn query_pet_error(error: pet::PetError) -> Error {
         pet::PetError::Protocol(_) | pet::PetError::OutputOverflow => ErrorKind::PetLost,
         pet::PetError::ProcessLost(_) => ErrorKind::PetLost,
     };
-    Error::new(kind, error.to_string())
+    projected_pet_error(kind, error, false)
+}
+
+fn projected_pet_error(kind: ErrorKind, error: pet::PetError, preserve_diagnostic: bool) -> Error {
+    let semantic = error.is_semantic();
+    let diagnostic = preserve_diagnostic
+        .then(|| match &error {
+            pet::PetError::Remote { diagnostic, .. } => diagnostic.clone(),
+            _ => None,
+        })
+        .flatten();
+    let result = Error::new(kind, error.public_message());
+    let result = if semantic { result.semantic() } else { result };
+    match diagnostic {
+        Some(diagnostic) => result.with_diagnostic(diagnostic),
+        None => result,
+    }
 }
 
 #[cfg(test)]
@@ -1124,11 +1211,15 @@ mod tests {
             code: -32000,
             kind,
             message: "typed diagnostic".into(),
+            diagnostic: None,
         }
     }
 
     #[test]
     fn pet_remote_errors_keep_operation_semantics() {
+        assert!(query_pet_error(remote(pet::PetRemoteKind::ReferenceNotFound)).semantic);
+        assert!(step_pet_error(remote(pet::PetRemoteKind::Coq)).semantic);
+        assert!(!query_pet_error(remote(pet::PetRemoteKind::Anomaly)).semantic);
         assert_eq!(
             query_pet_error(remote(pet::PetRemoteKind::ReferenceNotFound)).kind,
             ErrorKind::NotFound
@@ -1182,6 +1273,106 @@ mod tests {
             replaceable_declaration_ranges(&[declaration("only", 0, 20)]),
             vec![true]
         );
+    }
+
+    fn goal(id: i64, ty: &str) -> pet::PetGoal {
+        pet::PetGoal {
+            evar: vec![serde_json::json!("Ser_Evar"), serde_json::json!(id)],
+            name: None,
+            hypotheses: Vec::new(),
+            ty: ty.into(),
+        }
+    }
+
+    #[test]
+    fn goal_rendering_selects_pet_scopes_and_exact_evar_ids() {
+        let goals = pet::PetGoals {
+            focused: vec![goal(1, "focused")],
+            stack: vec![pet::PetGoalStackFrame {
+                left: vec![goal(2, "left")],
+                right: vec![goal(3, "right")],
+            }],
+            shelved: vec![goal(4, "shelved")],
+            given_up: vec![goal(5, "given-up")],
+            bullet: Some("Focus next goal with bullet -.".into()),
+            proof_mode: true,
+        };
+        assert_eq!(
+            render_goals(&goals, GoalScope::Focused, None).unwrap(),
+            "============================\nfocused"
+        );
+        let unfocused = render_goals(&goals, GoalScope::Unfocused, None).unwrap();
+        assert!(unfocused.contains("left"));
+        assert!(unfocused.contains("right"));
+        assert!(!unfocused.contains("focused"));
+        assert_eq!(
+            render_goals(
+                &goals,
+                GoalScope::All,
+                Some(&[serde_json::json!("Ser_Evar"), serde_json::json!(4)]),
+            )
+            .unwrap(),
+            "============================\nshelved"
+        );
+        assert!(
+            render_goals(
+                &goals,
+                GoalScope::Focused,
+                Some(&[serde_json::json!("Ser_Evar"), serde_json::json!(4)]),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn pet_run_error_preserves_unicode_fragment_byte_range() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("dune-project"),
+            "(lang dune 3.22)\n(using rocq 0.12)\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+        fs::write(
+            directory.path().join("A.v"),
+            "Theorem target : True.\nProof.\nAdmitted.\n",
+        )
+        .unwrap();
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let project = engine.attach(directory.path()).unwrap();
+        let actor = pet::PetActor::new();
+        let info = engine
+            .list_decls(&project, &actor, &FileId("A.v".into()))
+            .unwrap()
+            .into_iter()
+            .find(|info| info.identity.qualified_path.last().unwrap() == "target")
+            .unwrap();
+        let opened = match engine
+            .open_declaration(&project, &actor, info.identity)
+            .unwrap()
+        {
+            OpenResult::Open(opened) => *opened,
+            OpenResult::Published(_) => panic!("admitted source was reported as completed"),
+        };
+        let error = engine
+            .run(
+                &project,
+                &actor,
+                &opened.target,
+                opened.state,
+                "idtac \"🦀\". nonsense.",
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ProofStepFailed);
+        assert_eq!(
+            error.diagnostic,
+            Some(ProofDiagnostic {
+                byte_start: 14,
+                byte_end: 22,
+            })
+        );
+        actor.release_states(&[opened.state]).unwrap();
     }
 
     #[test]

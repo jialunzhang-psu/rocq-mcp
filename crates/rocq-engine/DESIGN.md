@@ -233,7 +233,8 @@ Required capabilities include:
 - atomic execution of a complete proof fragment;
 - exact batch release of exported state IDs;
 - authoritative workspace refresh after source/build mutation;
-- the PET queries used by the MCP query variants and trust audit.
+- the PET queries used by the MCP query variants and trust audit;
+- fragment-relative Rocq exception ranges for precise atomic-run diagnostics.
 
 If stock PET lacks one of these capabilities, it is added to the pinned PET
 submodule. Rust fallback scanners or alternative semantic implementations are
@@ -384,9 +385,19 @@ Public status remains only `Open` or `Completed`. There is no `SourceClosed`,
 accepted a terminal proof state; `Completed` additionally requires successful
 publication, Dune validation, and the configured PET trust audit. Every public
 proof-state view carries the exact reusable `DeclarationId` as `target` and
-`status`; open states carry `goals` and an optional selected `checkpoint`.
-Completed and hypothetical solved views omit their empty goals field. There is
-no parallel string theorem name or repeated statement.
+`status`. Every `Open` view carries `goals` (which may be an empty rendering),
+`goal_counts`, and a `focus` projection copied from PET's structured
+`goals/stack/bullet/shelf/given_up` response. A selected projection includes
+epoch-scoped PET evar IDs and never infers focus or completion from text.
+PET stack-frame sides remain distinct, and a missing bullet suggestion remains
+absent rather than becoming wrapper-inferred syntax. Full goal contexts are
+materialized from the current PET state only when returned; checkpoints retain
+the bounded focused rendering and identity/focus projection, not a second
+semantic goal database. Hypothetical `try` states are released before return,
+so their public projection omits goal IDs that no subsequent query could
+dereference.
+Completed views omit this open-state detail. There is no parallel string
+theorem name or repeated statement.
 
 ## 8. PET state ID lifecycle
 
@@ -548,7 +559,8 @@ It owns no proof topology. Its responsibilities include:
 - returning all declarations in that document in one request;
 - opening an exact declaration and returning its state/source metadata;
 - executing a complete fragment atomically from a supplied state;
-- goals plus direct Rocq `Search`, `About`, `Print`, type, notation,
+- lossless structured goals (including stack frames, bullet suggestion, shelf,
+  given-up goals, and PET evar identities) plus direct Rocq `Search`, `About`, `Print`, type, notation,
   dependency, and assumption queries;
 - a structured global-context report containing typed assumption identities
   and unsafe-theory flags for publication trust decisions;
@@ -639,6 +651,13 @@ classify localized diagnostic text. Rust decodes the numeric code once and
 projects it by operation; an older PET is rejected during the handshake rather
 than silently falling back to an ambiguous error class.
 
+Error projection has one public rule: a semantic Rocq rejection keeps PET's
+diagnostic text (and any PET-provided source range) verbatim; it is never
+rewritten as wrapper advice. Every non-semantic failure is projected as a
+typed MCP error whose public message includes an actionable `Next step:`.
+Prover implementation names and JSON-RPC numbers are implementation details
+for internal logs, not user-facing recovery instructions.
+
 ## 13. MCP operation mapping
 
 The public tool set and current request/response schemas are specified by
@@ -716,9 +735,14 @@ old branch, build, or write source.
 ### `query`
 
 Run all semantic variants through PET. Named `about`, `print`, `assumptions`,
-and `dependencies` queries use the current PET state with an active proof;
-without one they obtain a temporary state in the target document and release
-it after returning the materialized result. For `search`, `type`, and
+and `dependencies` queries use the explicitly requested target's document
+position whenever it differs from the selected proof. This remains true while
+an unrelated proof is active: one PET instance can hold the retained proof
+state and the temporary target state at once, and only the temporary state is
+released after the result is materialized. Thus a declaration in a file not
+imported by the active proof is still queryable. If the target exactly matches
+the selected proof, its retained state is used so an unpublished `declare`
+target remains queryable. For `search`, `type`, and
 `notations`, an explicit `at` always selects its source context even while a
 proof is active; otherwise use the active proof and reject if neither context
 exists. `search` is Rocq `Search`, not a wrapper metadata search.
@@ -797,6 +821,16 @@ They are replaced by one `PetActor` stored directly in each `ProjectRuntime`.
 - wrapper-inferred proof completion and source-derived lifecycle states;
 - cached semantic query results that can disagree with PET;
 - name-only lookup fallbacks and legacy protocol adapters.
+
+The wrapper may page a PET-owned goal rendering and select one exact PET evar
+ID, but it does not synthesize goal IDs, parse bullets, or flatten the proof
+stack. A goal ID is valid only for the current PET epoch and is discarded with
+the rest of the state handles after restart/replay. Goal scopes and UTF-8 byte
+paging are transport projections over a fresh PET `goals` response; they do
+not cache, reinterpret, or independently update the proof state. PET likewise
+owns a rejected fragment's exception range. The wrapper forwards its half-open
+UTF-8 byte offsets and never reparses a multi-sentence fragment to guess the
+failing sentence.
 
 ### Publication machinery
 

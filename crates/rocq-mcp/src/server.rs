@@ -265,7 +265,7 @@ impl ServerHandler for RocqServer {
     ) -> Result<ListToolsResult, McpError> {
         if request.is_some_and(|request| request.cursor.is_some()) {
             return Err(McpError::invalid_params(
-                "tool catalog is not paginated",
+                "tool catalog is not paginated; omit the cursor and retry",
                 None,
             ));
         }
@@ -285,7 +285,10 @@ impl ServerHandler for RocqServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         if self.get_tool(&request.name).is_none() {
-            return Err(McpError::invalid_params("unknown tool", None));
+            return Err(McpError::invalid_params(
+                "unknown tool; call tools/list and use one of the returned names",
+                None,
+            ));
         }
         let name = request.name;
         let args = Value::Object(request.arguments.unwrap_or_default());
@@ -295,7 +298,10 @@ impl ServerHandler for RocqServer {
         let cancel = context.ct.clone();
         let guard = tokio::select! {
             _ = context.ct.cancelled() => {
-                return Err(McpError::invalid_request("request cancelled before admission", None));
+                return Err(McpError::invalid_request(
+                    "request cancelled before admission; retry when ready",
+                    None,
+                ));
             }
             guard = admission.lock_owned() => guard,
         };
@@ -315,15 +321,19 @@ impl ServerHandler for RocqServer {
             if cancel.is_cancelled() {
                 return Err(Error::new(
                     ErrorKind::RequestCancelled,
-                    "request cancelled before admission",
+                    "request was cancelled before admission",
                 ));
             }
             with_request_cancellation(&pet_cancel, || dispatch(&runtime, &session, &name, args))
         })
         .await;
         cancellation_watch.abort();
-        let result =
-            joined.map_err(|_| McpError::internal_error("operation worker failed", None))?;
+        let result = joined.map_err(|_| {
+            McpError::internal_error(
+                "operation worker failed; retry the request or restart the server",
+                None,
+            )
+        })?;
         match result {
             Ok(value) => Ok(CallToolResult::structured(value).into()),
             Err(error) => Ok(CallToolResult::structured_error(public_error(&error)).into()),

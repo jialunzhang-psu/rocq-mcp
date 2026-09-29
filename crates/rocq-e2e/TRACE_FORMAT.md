@@ -12,9 +12,11 @@ A trace is plain JSONL (`.jsonl`), executed in file order. It uses five events:
 
 `command` holds a user ID, a complete tool call, and the exact expected JSON
 result. Output comparison ignores object key order, not missing or extra fields.
-The sole leaf marker `{"$checkpoint":true}` accepts any positive integer so a
-trace need not predict a connection-local allocation ID; every surrounding
-object and array remains exact.
+The leaf marker `{"$checkpoint":true}` accepts any positive integer so a
+trace need not predict a connection-local allocation ID. The leaf marker
+`{"$goal_id":true}` likewise accepts one non-empty PET evar array, whose
+opaque components are process-epoch-specific. Every surrounding object and
+array remains exact.
 `user_connect` opens a fresh MCP session; it does not restore the previous
 selection. `user_disconnect` closes that session. `server_kill` terminates the
 server and all sessions; a later `server_start` starts a new process.

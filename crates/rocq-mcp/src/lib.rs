@@ -93,7 +93,15 @@ mod tests {
                 "notations"
             ])
         );
-        for field in ["target", "at", "expression", "pattern", "offset"] {
+        for field in [
+            "target",
+            "at",
+            "expression",
+            "pattern",
+            "scope",
+            "goal_id",
+            "offset",
+        ] {
             assert!(value["inputSchema"]["properties"].get(field).is_some());
         }
         assert_eq!(value["inputSchema"]["properties"]["offset"]["minimum"], 0);
@@ -175,7 +183,44 @@ mod tests {
         ];
         for (kind, wire) in cases {
             let projected = public_error(&Error::new(kind, "detail"));
-            assert_eq!(projected, json!({"kind":wire,"message":"detail"}));
+            assert_eq!(projected["kind"], wire);
+            assert!(
+                projected["message"]
+                    .as_str()
+                    .is_some_and(|message| message.starts_with("detail")),
+                "{kind:?}: {projected}"
+            );
+            // Every wrapper-owned failure carries a concrete recovery action;
+            // the semantic path is tested separately below and must not
+            // acquire this prose.
+            assert!(
+                projected["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Next step:")),
+                "{kind:?}: {projected}"
+            );
+        }
+
+        let semantic = Error::new(ErrorKind::QueryFailed, "Rocq: unknown reference").semantic();
+        assert_eq!(
+            public_error(&semantic),
+            json!({"kind":"query_failed","message":"Rocq: unknown reference"})
+        );
+        for kind in [
+            ErrorKind::InvalidDeclaration,
+            ErrorKind::NotFound,
+            ErrorKind::ProofStepFailed,
+            ErrorKind::QueryFailed,
+        ] {
+            let diagnostic = format!("Rocq diagnostic for {kind:?}");
+            let value = public_error(&Error::new(kind, &diagnostic).semantic());
+            assert_eq!(value["message"], diagnostic, "{kind:?}: {value}");
+            assert!(
+                value["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Rocq diagnostic")
+            );
         }
     }
 
@@ -195,6 +240,7 @@ mod tests {
                 code: -32601,
                 kind: rocq_engine::pet::PetRemoteKind::MethodNotFound,
                 message: "release rejected".into(),
+                diagnostic: None,
             },
         ] {
             assert_eq!(
@@ -207,6 +253,7 @@ mod tests {
                 code: -32004,
                 kind: rocq_engine::pet::PetRemoteKind::Anomaly,
                 message: "internal failure".into(),
+                diagnostic: None,
             })
             .kind,
             ErrorKind::PetFailure
@@ -218,6 +265,42 @@ mod tests {
         assert_eq!(
             pet_release_error(PetError::TimedOut { timeout_ms: 10 }).kind,
             ErrorKind::ProofStepTimeout
+        );
+    }
+
+    #[test]
+    fn nonsemantic_pet_failures_have_recovery_without_backend_identifiers() {
+        for error in [
+            PetError::Remote {
+                code: -32601,
+                kind: rocq_engine::pet::PetRemoteKind::MethodNotFound,
+                message: "method petanque/legacy not found".into(),
+                diagnostic: None,
+            },
+            PetError::Remote {
+                code: -32004,
+                kind: rocq_engine::pet::PetRemoteKind::Anomaly,
+                message: "PET internal crash".into(),
+                diagnostic: None,
+            },
+        ] {
+            let value = public_error(&pet_release_error(error));
+            let message = value["message"].as_str().unwrap();
+            assert!(message.contains("Next step:"), "{value}");
+            assert!(!message.contains("PET"), "{value}");
+            assert!(!message.contains("petanque"), "{value}");
+            assert!(!message.contains("-320"), "{value}");
+        }
+
+        let semantic = pet_release_error(PetError::Remote {
+            code: -32008,
+            kind: rocq_engine::pet::PetRemoteKind::ReferenceNotFound,
+            message: "Reference_not_found: missing".into(),
+            diagnostic: None,
+        });
+        assert_eq!(
+            public_error(&semantic),
+            json!({"kind":"invalid_configuration","message":"Reference_not_found: missing"})
         );
     }
 
@@ -386,6 +469,87 @@ mod tests {
             dispatch(&runtime, &session, "abandon", json!({"target":id.clone()})).unwrap();
             assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn named_queries_use_their_target_document_without_disturbing_active_proof() {
+        let project = dune_project(
+            "Demo",
+            &[
+                (
+                    "A.v",
+                    "Theorem active : forall P : Prop, P -> P. Admitted.\n",
+                ),
+                ("B.v", "Theorem independent : True. Proof. exact I. Qed.\n"),
+            ],
+        );
+        let runtime = runtime();
+        let server = attach(&runtime, &project);
+        let active = json!({
+            "file":"A.v",
+            "qualified_path":["Demo","A","active"]
+        });
+        let independent = json!({
+            "file":"B.v",
+            "qualified_path":["Demo","B","independent"]
+        });
+        let opened = dispatch(
+            &runtime,
+            &server.session,
+            "prove",
+            json!({"target":active.clone()}),
+        )
+        .unwrap();
+        let checkpoint = opened["checkpoint"].clone();
+        let original_goals = opened["goals"].clone();
+        let attached = server.session.project().unwrap();
+        assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 1);
+
+        // A.v deliberately does not Require B.v. Every named query must use
+        // B's own post-declaration PET state rather than the retained A state.
+        for kind in ["about", "print", "assumptions", "dependencies"] {
+            let result = dispatch(
+                &runtime,
+                &server.session,
+                "query",
+                json!({"kind":kind,"target":independent.clone()}),
+            )
+            .unwrap();
+            assert!(result["text"].is_string(), "{kind}: {result}");
+            assert_eq!(
+                attached.actor().diagnostic_state_count().unwrap(),
+                1,
+                "{kind} leaked its temporary target-document state"
+            );
+        }
+
+        let missing = dispatch(
+            &runtime,
+            &server.session,
+            "query",
+            json!({
+                "kind":"about",
+                "target":{
+                    "file":"B.v",
+                    "qualified_path":["Demo","B","missing"]
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(missing.kind, ErrorKind::NotFound);
+        assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 1);
+
+        let after = dispatch(&runtime, &server.session, "query", json!({"kind":"goals"})).unwrap();
+        assert_eq!(after["checkpoint"], checkpoint);
+        assert_eq!(after["goals"], original_goals);
+        dispatch(
+            &runtime,
+            &server.session,
+            "abandon",
+            json!({"target":active}),
+        )
+        .unwrap();
+        assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 0);
     }
 
     #[test]

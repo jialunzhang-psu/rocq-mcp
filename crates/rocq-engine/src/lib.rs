@@ -10,8 +10,8 @@ pub use engine::{DuneProject, Engine, validate_fragments, validate_identity};
 pub use pet::{PetActor, PetStateId};
 pub use types::{
     DeclarationIdentity, DeclarationInfo, DeclarationKind, DeclarationTarget, EngineConfig, Error,
-    ErrorKind, FileId, LogicalLibrary, OpenResult, OpenedProof, PetQuery, ProofLifecycle,
-    ProofState, ProofStep,
+    ErrorKind, FileId, GoalFocus, GoalScope, GoalStackFrame, LogicalLibrary, OpenResult,
+    OpenedProof, PetQuery, ProofDiagnostic, ProofLifecycle, ProofState, ProofStep,
 };
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;

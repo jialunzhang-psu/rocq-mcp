@@ -17,10 +17,15 @@ pub(crate) fn assert_output(line: usize, expected: &Value, actual: &Value) -> Re
 /// Match a complete transport value while allowing only the explicitly
 /// unstable positive checkpoint integer.
 fn output_matches(expected: &Value, actual: &Value) -> bool {
-    if expected.as_object().is_some_and(|object| object.len() == 1)
-        && expected.get("$checkpoint") == Some(&Value::Bool(true))
-    {
-        return actual.as_u64().is_some_and(|checkpoint| checkpoint > 0);
+    if expected.as_object().is_some_and(|object| object.len() == 1) {
+        if expected.get("$checkpoint") == Some(&Value::Bool(true)) {
+            return actual.as_u64().is_some_and(|checkpoint| checkpoint > 0);
+        }
+        if expected.get("$goal_id") == Some(&Value::Bool(true)) {
+            return actual
+                .as_array()
+                .is_some_and(|components| !components.is_empty());
+        }
     }
     match (expected, actual) {
         (Value::Object(expected), Value::Object(actual)) => {
@@ -60,5 +65,13 @@ mod tests {
         assert_output(1, &marker, &json!(1)).unwrap();
         assert_output(1, &marker, &json!(0)).unwrap_err();
         assert_output(1, &marker, &json!("1")).unwrap_err();
+    }
+
+    #[test]
+    fn goal_id_marker_accepts_only_nonempty_pet_arrays() {
+        let marker = json!({"$goal_id": true});
+        assert_output(1, &marker, &json!(["Ser_Evar", 1])).unwrap();
+        assert_output(1, &marker, &json!([])).unwrap_err();
+        assert_output(1, &marker, &json!(1)).unwrap_err();
     }
 }
