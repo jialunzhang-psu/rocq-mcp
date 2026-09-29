@@ -643,6 +643,9 @@ the selected Dune project; it rejects every other assumption kind and unsafe
 theory flag. The public `query(kind = "assumptions")` operation may still
 materialize Rocq's human-readable `Print Assumptions` text, but that text is
 display-only and never feeds the trust policy or a follow-up `Locate` command.
+PET's hint-level loader progress (for example, fetching an opaque proof from a
+`.vo` file) is discarded at the query-result boundary; it is not semantic
+`Print Assumptions` output.
 
 The required `typed_errors_v1` capability is equally strict: the pinned PET
 must preserve structural Rocq failures at the protocol boundary, including a

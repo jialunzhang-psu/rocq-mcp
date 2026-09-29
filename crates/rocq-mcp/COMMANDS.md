@@ -148,7 +148,10 @@ Do not mix fields from different variants.
 
 `search`, `about`, and `print` execute Rocq `Search`, `About`, and `Print`
 directly through PET; they are not wrapper metadata projections. `print`
-returns Rocq's printed term, not the original tactic script. `goals` returns a
+returns Rocq's printed term, not the original tactic script. PET hint-level
+loader progress (for example, fetching opaque proofs from a `.vo` file) is
+not query output; Rocq's notice, warning, and error messages remain intact.
+`goals` returns a
 proof state with PET-owned observability: `goals` is always present for an
 open state (possibly `""`), `goal_counts` reports focused/unfocused/shelved/
 given-up/total counts, and `focus` reports the stack depth, PET's raw

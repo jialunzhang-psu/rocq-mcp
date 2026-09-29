@@ -23,6 +23,13 @@ pub(super) fn parse_run_result(value: &Value) -> Result<RunResult, PetError> {
 }
 
 pub(super) fn parse_feedback(value: &Value) -> Result<String, PetError> {
+    // PET serializes Rocq's LSP diagnostic severity as an integer.  Severity
+    // 4 is `hint`; Rocq uses it for loader/progress notices such as
+    // "Fetching opaque proofs from disk ...", not for the result of the
+    // vernacular query.  Keep the filtering typed at the protocol boundary
+    // rather than matching a product-specific message string.  Notice,
+    // warning, and error feedback remains visible to the caller.
+    const HINT_SEVERITY: i64 = 4;
     let feedback = value
         .as_object()
         .and_then(|object| object.get("feedback"))
@@ -36,16 +43,26 @@ pub(super) fn parse_feedback(value: &Value) -> Result<String, PetError> {
             let pair = item
                 .as_array()
                 .ok_or_else(|| PetError::Protocol("PET feedback item is not a pair".into()))?;
-            if pair.len() != 2 || pair[0].as_i64().is_none() {
-                return Err(PetError::Protocol("PET feedback level is invalid".into()));
-            }
-            pair[1]
+            let [level, message] = pair.as_slice() else {
+                return Err(PetError::Protocol("PET feedback item is not a pair".into()));
+            };
+            let level = level
+                .as_i64()
+                .ok_or_else(|| PetError::Protocol("PET feedback level is invalid".into()))?;
+            let message = message
                 .as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| PetError::Protocol("PET feedback message is invalid".into()))
+                .ok_or_else(|| PetError::Protocol("PET feedback message is invalid".into()))?;
+            Ok((level, message))
         })
         .collect::<Result<Vec<_>, _>>()
-        .map(|items| items.join("\n"))
+        .map(|items| {
+            items
+                .into_iter()
+                .filter_map(|(level, message)| (level != HINT_SEVERITY).then_some(message))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
 }
 
 pub(super) fn parse_goals(value: &Value, proof_mode: bool) -> Result<PetGoals, PetError> {
@@ -204,6 +221,21 @@ mod tests {
             "hyps": [],
             "ty": ty,
         })
+    }
+
+    #[test]
+    fn query_feedback_omits_loader_hints_but_keeps_semantic_output() {
+        let value = json!({
+            "feedback": [
+                [4, "Fetching opaque proofs from disk for Demo.Dependency"],
+                [3, "Closed under the global context"],
+                [2, "a warning from the queried command"]
+            ]
+        });
+        assert_eq!(
+            parse_feedback(&value).unwrap(),
+            "Closed under the global context\na warning from the queried command"
+        );
     }
 
     #[test]
