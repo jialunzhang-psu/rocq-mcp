@@ -97,6 +97,10 @@ impl PetRemoteKind {
 pub enum PetError {
     Invalid(String),
     Environment(String),
+    Cancelled,
+    TimedOut {
+        timeout_ms: u64,
+    },
     ProcessLost(String),
     Protocol(String),
     OutputOverflow,
@@ -116,6 +120,13 @@ impl PetError {
             self,
             Self::ProcessLost(_) | Self::Protocol(_) | Self::OutputOverflow
         )
+    }
+
+    /// Whether the current PET epoch must be discarded. Intentional request
+    /// cancellation and tactic deadlines terminate PET just like unexpected
+    /// transport loss, but remain distinct user-facing error classes.
+    fn invalidates_process(&self) -> bool {
+        self.is_transport_loss() || matches!(self, Self::Cancelled | Self::TimedOut { .. })
     }
 
     /// Whether PET reported an internal/system failure while the JSON-RPC
@@ -141,6 +152,10 @@ impl std::fmt::Display for PetError {
         match self {
             Self::Invalid(message) => write!(f, "invalid PET request: {message}"),
             Self::Environment(message) | Self::ProcessLost(message) => f.write_str(message),
+            Self::Cancelled => f.write_str("PET request was cancelled"),
+            Self::TimedOut { timeout_ms } => {
+                write!(f, "PET proof fragment exceeded {timeout_ms} ms")
+            }
             Self::Protocol(message) => write!(f, "PET protocol failure: {message}"),
             Self::OutputOverflow => f.write_str("PET response exceeded the output limit"),
             Self::Remote { code, message, .. } => {
@@ -298,7 +313,7 @@ impl PetActor {
             Err(error) => {
                 let error =
                     PetError::Protocol(format!("invalid PET declaration response: {error}"));
-                self.poison_if_lost(&error);
+                self.poison_if_invalidated(&error);
                 Err(error)
             }
         }
@@ -321,7 +336,7 @@ impl PetActor {
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| {
                 let error = PetError::Protocol("PET insertion point is invalid".into());
-                self.poison_if_lost(&error);
+                self.poison_if_invalidated(&error);
                 error
             })
     }
@@ -347,10 +362,26 @@ impl PetActor {
     /// Execute one complete caller fragment atomically. PET parses and runs all
     /// sentences itself; an error exports no partial-prefix state.
     pub(crate) fn run(&self, state: PetStateId, fragment: &str) -> Result<PetExecution, PetError> {
+        self.run_with_timeout(state, fragment, None)
+    }
+
+    /// Execute one complete caller fragment with an optional caller-selected
+    /// deadline. A deadline terminates the complete PET epoch because the
+    /// synchronous PET shell cannot accept an interrupt while running Rocq.
+    pub(crate) fn run_with_timeout(
+        &self,
+        state: PetStateId,
+        fragment: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<PetExecution, PetError> {
         if fragment.len() > MAX_REQUEST_BYTES / 2 {
             return Err(PetError::Invalid("proof fragment is oversized".into()));
         }
-        let value = self.call_live("petanque/run", json!({"st": state.get(), "tac": fragment}))?;
+        let value = self.call_live_with_timeout(
+            "petanque/run",
+            json!({"st": state.get(), "tac": fragment}),
+            timeout,
+        )?;
         self.materialize_run(value)
     }
 
@@ -359,7 +390,7 @@ impl PetActor {
         let value = self.call_live("petanque/goals", json!({"st": state.get()}))?;
         let result = decode_goals(&value);
         if let Err(error) = &result {
-            self.poison_if_lost(error);
+            self.poison_if_invalidated(error);
         }
         result
     }
@@ -398,7 +429,7 @@ impl PetActor {
                 }
             });
         if let Err(error) = &result {
-            self.poison_if_lost(error);
+            self.poison_if_invalidated(error);
         }
         result
     }
@@ -418,7 +449,7 @@ impl PetActor {
             )?;
             return serde_json::to_string(&value).map_err(|_| {
                 let error = PetError::Protocol("PET notation response is invalid".into());
-                self.poison_if_lost(&error);
+                self.poison_if_invalidated(&error);
                 error
             });
         }
@@ -435,13 +466,13 @@ impl PetActor {
         let run = match results::parse_run_result(&value) {
             Ok(run) => run,
             Err(error) => {
-                self.poison_if_lost(&error);
+                self.poison_if_invalidated(&error);
                 return Err(error);
             }
         };
         let feedback = results::parse_feedback(&value);
         if let Err(error) = &feedback {
-            self.poison_if_lost(error);
+            self.poison_if_invalidated(error);
         }
         let release = self.release_states(&[PetStateId::new(run.st)]);
         match (feedback, release) {
@@ -462,7 +493,7 @@ impl PetActor {
             Ok(response) => response,
             Err(_) => {
                 let error = PetError::Protocol("PET release response is invalid".into());
-                self.poison_if_lost(&error);
+                self.poison_if_invalidated(&error);
                 return Err(error);
             }
         };
@@ -470,7 +501,7 @@ impl PetActor {
         // PET accounted for every request occurrence.
         if response.released.len() + response.missing.len() != states.len() {
             let error = PetError::Protocol("PET release response has the wrong cardinality".into());
-            self.poison_if_lost(&error);
+            self.poison_if_invalidated(&error);
             return Err(error);
         }
         Ok(())
@@ -490,7 +521,7 @@ impl PetActor {
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| {
                 let error = PetError::Protocol("PET state count is invalid".into());
-                self.poison_if_lost(&error);
+                self.poison_if_invalidated(&error);
                 error
             })
     }
@@ -532,7 +563,7 @@ impl PetActor {
         let run = match results::parse_run_result(&value) {
             Ok(run) => run,
             Err(error) => {
-                self.poison_if_lost(&error);
+                self.poison_if_invalidated(&error);
                 return Err(error);
             }
         };
@@ -564,7 +595,7 @@ impl PetActor {
             .as_mut()
             .expect("PET exists")
             .rpc(method, params);
-        if result.as_ref().is_err_and(PetError::lost) {
+        if result.as_ref().is_err_and(PetError::invalidates_process) {
             state.process.take();
             state.workspace.take();
         }
@@ -572,12 +603,21 @@ impl PetActor {
     }
 
     fn call_live(&self, method: &str, params: Value) -> Result<Value, PetError> {
+        self.call_live_with_timeout(method, params, None)
+    }
+
+    fn call_live_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value, PetError> {
         let mut state = self.lock_state();
         let Some(process) = state.process.as_mut() else {
             return Err(PetError::ProcessLost("PET process is not running".into()));
         };
-        let result = process.rpc(method, params);
-        if result.as_ref().is_err_and(PetError::lost) {
+        let result = process.rpc_with_timeout(method, params, timeout);
+        if result.as_ref().is_err_and(PetError::invalidates_process) {
             state.process.take();
             state.workspace.take();
         }
@@ -615,7 +655,7 @@ impl PetActor {
                     "load_paths": load_paths,
                 }),
             );
-            if result.as_ref().is_err_and(PetError::lost) {
+            if result.as_ref().is_err_and(PetError::invalidates_process) {
                 state.process.take();
                 state.workspace.take();
             }
@@ -652,8 +692,8 @@ impl PetActor {
     /// state table cannot be trusted for replay.  Drop it before the next
     /// operation can reuse the process.  MCP serializes project operations, so
     /// this cannot race a replacement admitted for the same actor.
-    fn poison_if_lost(&self, error: &PetError) {
-        if error.is_transport_loss() {
+    fn poison_if_invalidated(&self, error: &PetError) {
+        if error.invalidates_process() {
             let mut state = self.lock_state();
             state.process.take();
             state.workspace.take();
@@ -797,6 +837,15 @@ impl PetProcess {
     }
 
     fn rpc(&mut self, method: &str, params: Value) -> Result<Value, PetError> {
+        self.rpc_with_timeout(method, params, None)
+    }
+
+    fn rpc_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value, PetError> {
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -809,9 +858,25 @@ impl PetProcess {
         if request.len() > MAX_REQUEST_BYTES {
             return Err(PetError::Invalid("PET request is oversized".into()));
         }
+        let deadline = timeout.map(ResponseDeadline::new).transpose()?;
+        if cancellation::request_cancelled() {
+            terminate_child(&mut self.child);
+            return Err(PetError::Cancelled);
+        }
         write_frame(&mut self.stdin, &request)
             .map_err(|error| self.transport_error("stdin write", error))?;
-        read_response(&mut self.stdout, id).map_err(|error| self.annotate_transport(error))
+        let result = read_response(&mut self.stdout, id, deadline);
+        if result
+            .as_ref()
+            .is_err_and(|error| matches!(error, PetError::Cancelled | PetError::TimedOut { .. }))
+        {
+            // Design note: PET's stdio loop cannot read a cancellation message
+            // while Rocq is executing. Killing this epoch is the only prompt,
+            // correctness-preserving interruption: exported IDs are discarded
+            // and MCP retains proof text for lazy replay.
+            terminate_child(&mut self.child);
+        }
+        result.map_err(|error| self.annotate_transport(error))
     }
 
     fn annotate_transport(&mut self, error: PetError) -> PetError {
@@ -1005,11 +1070,46 @@ fn write_frame(writer: &mut ChildStdin, body: &[u8]) -> io::Result<()> {
     writer.flush()
 }
 
-fn read_response(reader: &mut BufReader<ChildStdout>, request_id: u64) -> Result<Value, PetError> {
+#[derive(Clone, Copy)]
+struct ResponseDeadline {
+    at: std::time::Instant,
+    timeout_ms: u64,
+}
+
+impl ResponseDeadline {
+    fn new(timeout: std::time::Duration) -> Result<Self, PetError> {
+        if timeout.is_zero() {
+            return Err(PetError::Invalid("PET timeout must be positive".into()));
+        }
+        let timeout_ms = u64::try_from(timeout.as_millis())
+            .map_err(|_| PetError::Invalid("PET timeout is too large".into()))?;
+        if timeout_ms == 0 {
+            return Err(PetError::Invalid(
+                "PET timeout must be at least one millisecond".into(),
+            ));
+        }
+        let at = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| PetError::Invalid("PET timeout is too large".into()))?;
+        Ok(Self { at, timeout_ms })
+    }
+
+    fn error(self) -> PetError {
+        PetError::TimedOut {
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+fn read_response(
+    reader: &mut BufReader<ChildStdout>,
+    request_id: u64,
+    deadline: Option<ResponseDeadline>,
+) -> Result<Value, PetError> {
     let mut header = Vec::new();
     loop {
         let mut line = Vec::new();
-        read_line_bounded(reader, &mut line)?;
+        read_line_bounded(reader, &mut line, deadline)?;
         if line == b"\n" || line == b"\r\n" {
             if header.is_empty() {
                 continue;
@@ -1048,11 +1148,12 @@ fn read_response(reader: &mut BufReader<ChildStdout>, request_id: u64) -> Result
         return Err(PetError::OutputOverflow);
     }
     let mut body = vec![0; length];
-    reader.read_exact(&mut body).map_err(|error| {
-        PetError::ProcessLost(format!(
-            "PET stdout body read failed after Content-Length {length}: {error}"
-        ))
-    })?;
+    read_exact_interruptible(
+        reader,
+        &mut body,
+        deadline,
+        &format!("PET stdout body read failed after Content-Length {length}"),
+    )?;
     let mut deserializer = serde_json::Deserializer::from_slice(&body);
     deserializer.disable_recursion_limit();
     let value = Value::deserialize(&mut deserializer)
@@ -1112,18 +1213,110 @@ fn trim_ascii_space(value: &[u8]) -> &[u8] {
 fn read_line_bounded(
     reader: &mut BufReader<ChildStdout>,
     line: &mut Vec<u8>,
+    deadline: Option<ResponseDeadline>,
 ) -> Result<(), PetError> {
     loop {
         let mut byte = [0];
-        reader.read_exact(&mut byte).map_err(|error| {
-            PetError::ProcessLost(format!("PET stdout header read failed: {error}"))
-        })?;
+        read_exact_interruptible(reader, &mut byte, deadline, "PET stdout header read failed")?;
         line.push(byte[0]);
         if byte[0] == b'\n' {
             return Ok(());
         }
         if line.len() > MAX_HEADER_BYTES {
             return Err(PetError::OutputOverflow);
+        }
+    }
+}
+
+/// Fill exactly one framed-response component without allowing a blocking
+/// stdout read to hide request cancellation or a caller-selected deadline.
+/// EOF and I/O errors are classified as transport loss with operation context.
+fn read_exact_interruptible(
+    reader: &mut BufReader<ChildStdout>,
+    output: &mut [u8],
+    deadline: Option<ResponseDeadline>,
+    operation: &str,
+) -> Result<(), PetError> {
+    let mut offset = 0;
+    while offset < output.len() {
+        if reader.buffer().is_empty() {
+            wait_for_pet_output(reader, deadline)?;
+        }
+        match reader.read(&mut output[offset..]) {
+            Ok(0) => {
+                return Err(PetError::ProcessLost(format!(
+                    "{operation}: failed to fill whole buffer"
+                )));
+            }
+            Ok(length) => offset += length,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                return Err(PetError::ProcessLost(format!("{operation}: {error}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Wait until PET stdout can be read, checking the request signal and optional
+/// response deadline at least every 25 ms. A returned cancellation/deadline
+/// error is consumed by `rpc_with_timeout`, which kills and reaps the epoch.
+fn wait_for_pet_output(
+    reader: &BufReader<ChildStdout>,
+    deadline: Option<ResponseDeadline>,
+) -> Result<(), PetError> {
+    if !cancellation::request_scope_active() && deadline.is_none() {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        loop {
+            if cancellation::request_cancelled() {
+                return Err(PetError::Cancelled);
+            }
+            let wait_ms = if let Some(deadline) = deadline {
+                let now = std::time::Instant::now();
+                if now >= deadline.at {
+                    return Err(deadline.error());
+                }
+                i32::try_from((deadline.at - now).as_millis().clamp(1, 25)).unwrap_or(25)
+            } else {
+                25
+            };
+            let mut descriptor = nix::libc::pollfd {
+                fd: reader.get_ref().as_raw_fd(),
+                events: nix::libc::POLLIN | nix::libc::POLLHUP | nix::libc::POLLERR,
+                revents: 0,
+            };
+            // SAFETY: `descriptor` is a valid stack allocation, the count is
+            // exactly one, and `poll` does not retain the pointer after return.
+            let result = unsafe { nix::libc::poll(&mut descriptor, 1, wait_ms) };
+            if result > 0 {
+                return Ok(());
+            }
+            if result == 0 {
+                continue;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(PetError::ProcessLost(format!(
+                    "PET stdout readiness wait failed: {error}"
+                )));
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if cancellation::request_cancelled() {
+            Err(PetError::Cancelled)
+        } else if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline.at) {
+            Err(deadline.unwrap().error())
+        } else {
+            Ok(())
         }
     }
 }
@@ -1183,7 +1376,12 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+mod cancellation;
 mod results;
+
+pub use cancellation::{
+    PetRequestCancellation, commit_request, request_cancelled, with_request_cancellation,
+};
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -1333,6 +1531,65 @@ while True:
         assert!(message.contains("failed to fill whole buffer"), "{message}");
         assert!(message.contains("exit status: 23"), "{message}");
         assert!(message.contains("EOF-DIAGNOSTIC"), "{message}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn admitted_request_cancellation_terminates_a_hung_pet_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = fake_pet(
+            &directory,
+            "",
+            "sys.stderr.write('HUNG-RPC-STARTED\\n')\n\
+             sys.stderr.flush()\n\
+             __import__('time').sleep(60)",
+        );
+        let mut process = PetProcess::spawn(directory.path(), &script).unwrap();
+        handshake(&mut process).unwrap();
+        let process_group = process.child.id() as i32;
+        let cancellation = PetRequestCancellation::new();
+        let worker_cancellation = cancellation.clone();
+        let (result_tx, result_rx) = mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            let error = with_request_cancellation(&worker_cancellation, || {
+                process.rpc("test/hang", json!({})).unwrap_err()
+            });
+            result_tx.send((process, error)).unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancellation.cancel();
+        let (mut process, error) = result_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|_| {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-process_group),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+                panic!("cancelled PET request did not stop")
+            });
+        worker.join().unwrap();
+        assert_eq!(error, PetError::Cancelled);
+        assert!(process.child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proof_fragment_deadline_terminates_a_hung_pet_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = fake_pet(&directory, "", "__import__('time').sleep(60)");
+        let mut process = PetProcess::spawn(directory.path(), &script).unwrap();
+        handshake(&mut process).unwrap();
+        let started = std::time::Instant::now();
+        let error = process
+            .rpc_with_timeout(
+                "test/hang",
+                json!({}),
+                Some(std::time::Duration::from_millis(40)),
+            )
+            .unwrap_err();
+        assert_eq!(error, PetError::TimedOut { timeout_ms: 40 });
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(process.child.try_wait().unwrap().is_some());
     }
 
     #[test]

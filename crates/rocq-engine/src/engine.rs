@@ -347,10 +347,13 @@ impl Engine {
         target: &DeclarationTarget,
         state: pet::PetStateId,
         fragment: &str,
+        timeout: Option<std::time::Duration>,
     ) -> Result<ProofStep> {
         self.validate_target(project, target)?;
         validate_fragment(fragment)?;
-        let execution = actor.run(state, fragment).map_err(step_pet_error)?;
+        let execution = actor
+            .run_with_timeout(state, fragment, timeout)
+            .map_err(step_pet_error)?;
         if !execution.goals.proof_mode || !execution.goals.given_up.is_empty() {
             actor
                 .release_states(&[execution.state])
@@ -1051,6 +1054,8 @@ fn remote_pet_kind(kind: pet::PetRemoteKind, operation: PetOperation) -> ErrorKi
 
 fn declaration_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
+        pet::PetError::Cancelled => ErrorKind::RequestCancelled,
+        pet::PetError::TimedOut { .. } => ErrorKind::ProofStepTimeout,
         error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
         pet::PetError::Invalid(_) => ErrorKind::InvalidDeclaration,
@@ -1063,6 +1068,8 @@ fn declaration_pet_error(error: pet::PetError) -> Error {
 
 fn step_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
+        pet::PetError::Cancelled => ErrorKind::RequestCancelled,
+        pet::PetError::TimedOut { .. } => ErrorKind::ProofStepTimeout,
         error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,
         pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
@@ -1075,6 +1082,8 @@ fn step_pet_error(error: pet::PetError) -> Error {
 
 fn query_pet_error(error: pet::PetError) -> Error {
     let kind = match &error {
+        pet::PetError::Cancelled => ErrorKind::RequestCancelled,
+        pet::PetError::TimedOut { .. } => ErrorKind::ProofStepTimeout,
         error if error.lost() => ErrorKind::PetLost,
         pet::PetError::Invalid(_) => ErrorKind::InvalidRequest,
         pet::PetError::Environment(_) => ErrorKind::InvalidConfiguration,

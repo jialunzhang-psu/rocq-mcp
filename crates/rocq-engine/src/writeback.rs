@@ -352,12 +352,12 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn refresh_error(error: crate::pet::PetError) -> Error {
-    let kind = if error.lost() {
-        ErrorKind::PetLost
-    } else if error.is_internal_failure() {
-        ErrorKind::PetFailure
-    } else {
-        ErrorKind::InvalidConfiguration
+    let kind = match &error {
+        crate::pet::PetError::Cancelled => ErrorKind::RequestCancelled,
+        crate::pet::PetError::TimedOut { .. } => ErrorKind::ProofStepTimeout,
+        error if error.lost() => ErrorKind::PetLost,
+        error if error.is_internal_failure() => ErrorKind::PetFailure,
+        _ => ErrorKind::InvalidConfiguration,
     };
     Error::new(kind, error.to_string())
 }

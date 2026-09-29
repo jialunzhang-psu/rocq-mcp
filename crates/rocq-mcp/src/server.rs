@@ -14,7 +14,10 @@ use rmcp::{
     },
     service::RequestContext,
 };
-use rocq_engine::{DuneProject, Engine, Error, ErrorKind, PetActor};
+use rocq_engine::{
+    DuneProject, Engine, Error, ErrorKind, PetActor,
+    pet::{PetRequestCancellation, with_request_cancellation},
+};
 use serde_json::Value;
 use std::{
     borrow::Cow,
@@ -296,20 +299,31 @@ impl ServerHandler for RocqServer {
             }
             guard = admission.lock_owned() => guard,
         };
-        // Synchronous Dune/PET calls execute off the async runtime. Once
-        // admitted, an operation runs to its transaction boundary.
-        let result = tokio::task::spawn_blocking(move || {
+        // Synchronous Dune/PET calls execute off the async runtime. rmcp
+        // cancels `context.ct` when the peer sends notifications/cancelled or
+        // disconnects; mirror it into the blocking PET response wait so an
+        // admitted runaway tactic cannot outlive its abandoned request.
+        let pet_cancel = PetRequestCancellation::new();
+        let watched_pet_cancel = pet_cancel.clone();
+        let watched_protocol_cancel = cancel.clone();
+        let cancellation_watch = tokio::spawn(async move {
+            watched_protocol_cancel.cancelled().await;
+            watched_pet_cancel.cancel();
+        });
+        let joined = tokio::task::spawn_blocking(move || {
             let _guard = guard;
             if cancel.is_cancelled() {
                 return Err(Error::new(
-                    ErrorKind::InvalidRequest,
+                    ErrorKind::RequestCancelled,
                     "request cancelled before admission",
                 ));
             }
-            dispatch(&runtime, &session, &name, args)
+            with_request_cancellation(&pet_cancel, || dispatch(&runtime, &session, &name, args))
         })
-        .await
-        .map_err(|_| McpError::internal_error("operation worker failed", None))?;
+        .await;
+        cancellation_watch.abort();
+        let result =
+            joined.map_err(|_| McpError::internal_error("operation worker failed", None))?;
         match result {
             Ok(value) => Ok(CallToolResult::structured(value).into()),
             Err(error) => Ok(CallToolResult::structured_error(public_error(&error)).into()),

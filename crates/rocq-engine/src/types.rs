@@ -26,6 +26,12 @@ pub enum ErrorKind {
     Ambiguous,
     DeclarationChanged,
     ProofStepFailed,
+    /// A caller-selected deadline expired while PET was evaluating one proof
+    /// fragment. The checkpoint graph is unchanged and the PET epoch is gone.
+    ProofStepTimeout,
+    /// The MCP peer cancelled an admitted request. Any in-flight PET epoch is
+    /// terminated; replayable proof topology remains owned by MCP.
+    RequestCancelled,
     /// The PET child or its protocol transport was lost; this is not a
     /// correctness or execution deadline.
     PetLost,

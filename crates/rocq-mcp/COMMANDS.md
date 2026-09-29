@@ -36,6 +36,19 @@ MCP server/connection is a different session and still requires `start`.
 Transport diagnostics preserve the OS error, child exit status or signal, and
 a bounded stderr tail when available.
 
+MCP `notifications/cancelled` is observed while waiting in the connection queue,
+at wrapper transaction boundaries, and continuously while waiting for PET.
+PET's stdio protocol executes one Rocq request synchronously and cannot read an
+interrupt concurrently, so cancellation that wins before the operation's
+commit point terminates that PET process epoch. The server then reaps it,
+releases the serialized operation, retains the proof/checkpoint text, and
+lazily replays on the next safe request. Such a cancellation never advances a
+checkpoint or writes source. A notification racing after the explicit commit
+point is too late: publication/rollback runs to a consistent boundary. An
+already-running Dune subprocess likewise runs to its transaction boundary; it
+is not asynchronously killed. If a cancelled response is still observed, its
+kind is `request_cancelled`; normally the cancelling client discards it.
+
 ## `start`
 
 ```json
@@ -231,6 +244,7 @@ invalidates stale IDs held by sibling sessions.
 
 ```json
 {"tool":"check","args":{"attempts":["intro n. reflexivity.","intros; auto."]}}
+{"tool":"check","args":{"attempts":["eauto.","firstorder."],"timeout_ms":5000}}
 ```
 
 Accepts 1–20 ordered proof fragments; each fragment may contain one or more
@@ -264,17 +278,22 @@ configuration failure, `axiom_dependency_out_of_scope`, or
 `unfinished_dependency`; none is converted into `Completed`.
 
 The complete array is structurally validated before PET evaluates any
-fragment. Before consuming the selected PET state, the wrapper validates its
+fragment. Optional `timeout_ms` is a positive integer applied independently to
+each complete fragment, not to the whole alternatives list. A timed-out
+fragment is a `proof_step_timeout` rejection; its partial execution is never
+committed, PET is replaced, and the next alternative is replayed from the same
+selected checkpoint. With no `timeout_ms`, no tactic deadline is invented, but
+MCP request cancellation remains effective. Before consuming the selected PET state, the wrapper validates its
 source digest and current Dune source selection. Native close has no default
 build deadline. An operator may set the single explicit Dune-command limit
-with `ROCQ_COMMAND_TIMEOUT_SECS`; PET proof execution itself has no
-wrapper-invented correctness deadline. `pet_lost` means loss of the PET
+with `ROCQ_COMMAND_TIMEOUT_SECS`. `pet_lost` means unexpected loss of the PET
 child/protocol transport, after which
 checkpoint states are invalidated and lazily replayed.
 
 | Top-level error kind | When |
 |---|---|
 | `invalid_request` | No selected proof, or invalid, empty, oversized, or extra input. |
+| `request_cancelled` | The MCP peer cancelled the admitted operation. |
 | `declaration_changed` | The declaration interface changed. |
 | `pet_lost` | The project PET child or its protocol transport was lost. |
 | `project_timeout` | Dune project discovery or description timed out. |
@@ -285,6 +304,7 @@ checkpoint states are invalidated and lazily replayed.
 
 ```json
 {"tool":"try","args":{"attempts":["intro n. reflexivity.","auto."]}}
+{"tool":"try","args":{"attempts":["eauto.","firstorder."],"timeout_ms":5000}}
 ```
 
 Accepts the same 1–20 multi-sentence proof fragments as `check` and evaluates
@@ -299,10 +319,14 @@ exposes no partial-prefix state and has its own `proof_step_failed` or other
 typed error. Hypothetical states never contain a checkpoint; a solved
 hypothetical state omits its empty `goals` field, while `solved:true` remains
 the explicit indication that the fragment would close the proof.
+`timeout_ms` has the same per-fragment semantics as `check`. A timed-out entry
+is returned with `solved:false` and a `proof_step_timeout` error; later entries
+still run independently after the original checkpoint is replayed.
 
 | Top-level error kind | When |
 |---|---|
 | `invalid_request` | No selected proof, invalid array, invalid fragment, or extra argument. |
+| `request_cancelled` | The MCP peer cancelled the admitted operation. |
 | `declaration_changed` | The declaration interface changed. |
 | `pet_lost` | The project PET child or its protocol transport was lost. |
 | `project_timeout` | Dune project discovery or description timed out. |

@@ -41,6 +41,11 @@ pub fn tool_definitions() -> &'static [Tool] {
             "required":["file","qualified_path"],
             "additionalProperties":false
         });
+        let timeout_ms = json!({
+            "type":"integer",
+            "minimum":1,
+            "description":"Optional deadline in milliseconds, applied independently to each proof fragment."
+        });
         // Design note: a root-level oneOf is flattened incorrectly by some
         // tool-discovery clients, leaving only its first kind visible. Keep
         // the wire schema flat and enforce kind-specific fields in dispatch.
@@ -90,14 +95,20 @@ pub fn tool_definitions() -> &'static [Tool] {
             (
                 "check",
                 schema(
-                    json!({"attempts":{"type":"array","items":s,"minItems":1,"maxItems":20}}),
+                    json!({
+                        "attempts":{"type":"array","items":s,"minItems":1,"maxItems":20},
+                        "timeout_ms":timeout_ms.clone()
+                    }),
                     &["attempts"],
                 ),
             ),
             (
                 "try",
                 schema(
-                    json!({"attempts":{"type":"array","items":s,"minItems":1,"maxItems":20}}),
+                    json!({
+                        "attempts":{"type":"array","items":s,"minItems":1,"maxItems":20},
+                        "timeout_ms":timeout_ms
+                    }),
                     &["attempts"],
                 ),
             ),

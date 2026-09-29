@@ -196,7 +196,28 @@ new process accepts work.
 
 Blind retries are forbidden. A semantic Rocq error or non-zero Dune build is
 returned as such. PET replacement and state replay occur only after loss of
-the PET transport or at an explicit project-mutation boundary.
+the PET transport, an explicit project-mutation boundary, or an intentional
+request-cancellation/deadline boundary.
+
+PET's stdio JSON shell reads and executes one request synchronously. Although
+the underlying agent accepts a `Coq.Limits.Token`, the shell cannot read a
+second cancellation message or set that token while `petanque/run` is busy.
+Consequently the wrapper observes MCP cancellation while waiting for PET and
+terminates/reaps that complete PET epoch. This is an explicit epoch transition,
+not an ambiguous retry: MCP retains checkpoint topology and accepted text,
+clears every project state ID, and the next safe request lazily replays. An
+atomic request state orders cancellation against the first irreversible wrapper
+mutation: if cancellation wins, no checkpoint/source transition occurs; if the
+commit point wins, a late notification cannot interrupt publication or its
+rollback. Native Dune subprocesses are observed at transaction boundaries and
+are not asynchronously killed.
+
+`check` and `try` additionally accept an optional positive `timeout_ms`. It is
+applied separately to each atomic fragment. Expiry has the same epoch effect as
+cancellation but is returned as the typed `proof_step_timeout` rejection, so a
+later alternative may replay the unchanged base checkpoint and continue. No
+default tactic deadline is imposed. Request cancellation aborts the complete
+tool call and is never converted into an alternative rejection.
 
 ### 5.3 Capability handshake
 

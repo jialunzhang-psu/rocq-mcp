@@ -7,10 +7,10 @@ use crate::{
 };
 use rocq_engine::{
     DeclarationIdentity, DeclarationInfo, DeclarationKind, Engine, Error, ErrorKind, FileId,
-    OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, validate_fragments,
+    OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, pet, validate_fragments,
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Maximum raw UTF-8 bytes returned by one semantic text query response.
 /// PET still owns the complete result; this limit bounds only MCP transport.
@@ -25,6 +25,8 @@ pub(crate) fn public_error(error: &Error) -> Value {
         ErrorKind::Ambiguous => "ambiguous",
         ErrorKind::DeclarationChanged => "declaration_changed",
         ErrorKind::ProofStepFailed => "proof_step_failed",
+        ErrorKind::ProofStepTimeout => "proof_step_timeout",
+        ErrorKind::RequestCancelled => "request_cancelled",
         ErrorKind::PetLost => "pet_lost",
         ErrorKind::QueryFailed => "query_failed",
         ErrorKind::PetFailure => "pet_failure",
@@ -145,6 +147,49 @@ fn attempts(args: &Value) -> Result<Vec<String>, Error> {
     Ok(fragments)
 }
 
+fn attempt_timeout(args: &Value) -> Result<Option<Duration>, Error> {
+    args.get("timeout_ms")
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| *value > 0)
+                .map(Duration::from_millis)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidRequest,
+                        "timeout_ms must be a positive integer",
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn reject_cancelled() -> Result<(), Error> {
+    if pet::request_cancelled() {
+        Err(Error::new(ErrorKind::RequestCancelled, "request cancelled"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Establish the request's linearization point immediately before a
+/// wrapper-owned mutation. Cancellation that won first aborts the operation;
+/// cancellation arriving later cannot interrupt the committed transaction.
+fn commit_or_cancelled() -> Result<(), Error> {
+    if pet::commit_request() {
+        Ok(())
+    } else {
+        Err(Error::new(ErrorKind::RequestCancelled, "request cancelled"))
+    }
+}
+
+fn invalidates_pet_epoch(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::PetLost | ErrorKind::ProofStepTimeout | ErrorKind::RequestCancelled
+    )
+}
+
 /// Dispatch one request. Lock order is project operation barrier, then
 /// connection selection. This lets publication invalidate other sessions
 /// without racing a queued operation that still holds its session mutex.
@@ -154,6 +199,7 @@ pub(crate) fn dispatch(
     name: &str,
     args: Value,
 ) -> Result<Value, Error> {
+    reject_cancelled()?;
     if name == "start" {
         return start(runtime, session, &args);
     }
@@ -161,6 +207,7 @@ pub(crate) fn dispatch(
         .project()
         .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "call start first"))?;
     let _operation = project.lock();
+    reject_cancelled()?;
     let layout_changed = runtime.engine.refresh_project(project.project())?;
     let mut selection = session
         .selection
@@ -183,11 +230,21 @@ pub(crate) fn dispatch(
         project.actor().restart();
         runtime.invalidate_project_states(&project, session, &mut selection);
     }
+    reject_cancelled()?;
     let result = dispatch_attached(runtime, session, &project, &mut selection, name, &args);
     if result
         .as_ref()
-        .is_err_and(|error| error.kind == ErrorKind::PetLost)
+        .is_err_and(|error| invalidates_pet_epoch(error.kind))
     {
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind == ErrorKind::RequestCancelled)
+        {
+            // A late cancellation can arrive after PET produced a response.
+            // Force the epoch boundary even in that race so no unowned state
+            // created by the cancelled request can survive.
+            project.actor().restart();
+        }
         runtime.invalidate_project_states(&project, session, &mut selection);
     }
     result
@@ -205,6 +262,8 @@ fn start(
     if let Some(previous) = session.project() {
         if Arc::ptr_eq(&previous, &next) {
             let _operation = previous.lock();
+            reject_cancelled()?;
+            commit_or_cancelled()?;
             let mut selection = session
                 .selection
                 .lock()
@@ -221,6 +280,8 @@ fn start(
         // switch projects in opposite directions. Retire the previous proof,
         // detach, then admit the independently serialized target runtime.
         let _operation = previous.lock();
+        reject_cancelled()?;
+        commit_or_cancelled()?;
         let mut selection = session
             .selection
             .lock()
@@ -233,6 +294,8 @@ fn start(
     }
 
     let _operation = next.lock();
+    reject_cancelled()?;
+    commit_or_cancelled()?;
     let mut selection = session
         .selection
         .lock()
@@ -342,13 +405,14 @@ fn dispatch_attached(
                     "no active unpublished proof has that declaration",
                 ));
             }
+            commit_or_cancelled()?;
             if retire_proof(project, selection)? {
                 runtime.invalidate_project_states(project, session, selection);
             }
             Ok(json!({}))
         }
         "check" => check(runtime, session, project, selection, args),
-        "try" => try_fragments(engine, project, selection, args),
+        "try" => try_fragments(runtime, session, project, selection, args),
         "rewind" => rewind(engine, project, selection, args),
         "query" => query(engine, project, selection, args),
         _ => Err(Error::new(ErrorKind::InvalidRequest, "unknown tool")),
@@ -362,6 +426,7 @@ fn begin_proof(
 ) -> Result<Value, Error> {
     let state = opened.state;
     let view = opened.view.clone();
+    commit_or_cancelled()?;
     let checkpoint =
         match selection
             .checkpoints
@@ -398,9 +463,10 @@ fn check(
     selection: &mut Selection,
     args: &Value,
 ) -> Result<Value, Error> {
-    reject_unknown(args, &["attempts"])?;
+    reject_unknown(args, &["attempts", "timeout_ms"])?;
     let fragments = attempts(args)?;
-    let (base_id, base_state) = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
+    let timeout = attempt_timeout(args)?;
+    let (base_id, _) = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
     let target = selection
         .checkpoints
         .proof
@@ -410,14 +476,38 @@ fn check(
         .clone();
     let mut rejected = Vec::new();
     for (index, fragment) in fragments.iter().enumerate() {
+        // A timed-out earlier alternative destroyed the PET epoch. Reacquire
+        // the same selected checkpoint lazily before evaluating the next one.
+        let (_, base_state) = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
         match runtime.engine.run(
             project.project(),
             project.actor(),
             &target,
             base_state,
             fragment,
+            timeout,
         ) {
             Ok(step) => {
+                // Validate the native terminator before committing a finished
+                // fragment. Cancellation can therefore still win without
+                // advancing the checkpoint; after commit, publication is an
+                // indivisible source transaction and must reach rollback or
+                // success even if a late notification arrives.
+                let close_error = if step.finished {
+                    runtime
+                        .engine
+                        .close_proof(project.project(), project.actor(), &target, step.state)
+                        .err()
+                } else {
+                    None
+                };
+                if close_error
+                    .as_ref()
+                    .is_some_and(|error| error.kind == ErrorKind::RequestCancelled)
+                {
+                    return Err(close_error.unwrap());
+                }
+                commit_or_cancelled()?;
                 let checkpoint = match selection.checkpoints.commit(
                     step.state,
                     fragment.clone(),
@@ -433,6 +523,18 @@ fn check(
                         return Err(checkpoint_error(error));
                     }
                 };
+                if let Some(error) = close_error {
+                    if invalidates_pet_epoch(error.kind) {
+                        runtime.invalidate_project_states(project, session, selection);
+                    }
+                    return Ok(selected_error(
+                        index,
+                        &step.view,
+                        Some(checkpoint),
+                        rejected,
+                        &error,
+                    ));
+                }
                 if !step.finished {
                     return Ok(selected_result(
                         index,
@@ -445,23 +547,6 @@ fn check(
                     .checkpoints
                     .fragments(checkpoint)
                     .map_err(checkpoint_error)?;
-                if let Err(error) = runtime.engine.close_proof(
-                    project.project(),
-                    project.actor(),
-                    &target,
-                    step.state,
-                ) {
-                    if error.kind == ErrorKind::PetLost {
-                        runtime.invalidate_project_states(project, session, selection);
-                    }
-                    return Ok(selected_error(
-                        index,
-                        &step.view,
-                        Some(checkpoint),
-                        rejected,
-                        &error,
-                    ));
-                }
                 match runtime.engine.publish(
                     project.project(),
                     project.actor(),
@@ -488,6 +573,10 @@ fn check(
             }
             Err(error) if error.kind == ErrorKind::ProofStepFailed => {
                 rejected.push(public_error(&error));
+            }
+            Err(error) if error.kind == ErrorKind::ProofStepTimeout => {
+                rejected.push(public_error(&error));
+                runtime.invalidate_project_states(project, session, selection);
             }
             Err(error) => return Err(error),
         }
@@ -537,14 +626,16 @@ fn selected_error(
 }
 
 fn try_fragments(
-    engine: &Engine,
-    project: &ProjectRuntime,
+    runtime: &Arc<ServerRuntime>,
+    session: &Arc<SessionCell>,
+    project: &Arc<ProjectRuntime>,
     selection: &mut Selection,
     args: &Value,
 ) -> Result<Value, Error> {
-    reject_unknown(args, &["attempts"])?;
+    reject_unknown(args, &["attempts", "timeout_ms"])?;
     let fragments = attempts(args)?;
-    let (_, base_state) = ensure_current_state(engine, project, selection)?;
+    let timeout = attempt_timeout(args)?;
+    let _ = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
     let target = selection
         .checkpoints
         .proof
@@ -554,14 +645,17 @@ fn try_fragments(
         .clone();
     let mut output = Vec::new();
     for fragment in fragments {
-        match engine.run(
+        let (_, base_state) = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
+        match runtime.engine.run(
             project.project(),
             project.actor(),
             &target,
             base_state,
             &fragment,
+            timeout,
         ) {
             Ok(step) => {
+                reject_cancelled()?;
                 let state = state_json(&step.view, None);
                 project
                     .actor()
@@ -574,6 +668,13 @@ fn try_fragments(
                     "solved": false,
                     "error": public_error(&error),
                 }));
+            }
+            Err(error) if error.kind == ErrorKind::ProofStepTimeout => {
+                output.push(json!({
+                    "solved": false,
+                    "error": public_error(&error),
+                }));
+                runtime.invalidate_project_states(project, session, selection);
             }
             Err(error) => return Err(error),
         }
@@ -633,6 +734,7 @@ fn rewind(
     {
         replay_checkpoint(engine, project, selection, target)?;
     }
+    commit_or_cancelled()?;
     selection
         .checkpoints
         .select(target)
@@ -885,10 +987,16 @@ fn replay_checkpoint(
             &proof_target,
             state,
             input,
+            None,
         ) {
             Ok(step) => step,
             Err(error) => {
-                release_staged(project, &staged)?;
+                // Process-invalidating errors already discarded every staged
+                // state. Preserve their primary classification rather than
+                // replacing cancellation/transport loss with a failed release.
+                if !invalidates_pet_epoch(error.kind) {
+                    release_staged(project, &staged)?;
+                }
                 return Err(error);
             }
         };
@@ -1013,16 +1121,16 @@ fn checkpoint_error(error: CheckpointError) -> Error {
 }
 
 pub(crate) fn pet_release_error(error: rocq_engine::pet::PetError) -> Error {
-    // Design note: only transport loss invalidates every state ID in the
-    // project epoch. A live PET rejecting a release is an owner/protocol
-    // configuration failure; reporting it as transport loss would make the
-    // dispatcher erase replayable checkpoints while retaining the child.
-    let kind = if error.is_transport_loss() {
-        ErrorKind::PetLost
-    } else if error.is_internal_failure() {
-        ErrorKind::PetFailure
-    } else {
-        ErrorKind::InvalidConfiguration
+    // Design note: unexpected transport loss and intentional cancellation /
+    // deadline boundaries have distinct public meanings even though all end
+    // the PET epoch. A live semantic release rejection remains an
+    // owner/protocol configuration failure.
+    let kind = match &error {
+        rocq_engine::pet::PetError::Cancelled => ErrorKind::RequestCancelled,
+        rocq_engine::pet::PetError::TimedOut { .. } => ErrorKind::ProofStepTimeout,
+        error if error.is_transport_loss() => ErrorKind::PetLost,
+        error if error.is_internal_failure() => ErrorKind::PetFailure,
+        _ => ErrorKind::InvalidConfiguration,
     };
     Error::new(kind, error.to_string())
 }
@@ -1030,6 +1138,19 @@ pub(crate) fn pet_release_error(error: rocq_engine::pet::PetError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attempt_deadline_is_optional_and_strictly_positive() {
+        assert_eq!(attempt_timeout(&json!({})).unwrap(), None);
+        assert_eq!(
+            attempt_timeout(&json!({"timeout_ms": 25})).unwrap(),
+            Some(Duration::from_millis(25))
+        );
+        for value in [json!(0), json!(-1), json!(1.5), json!("25")] {
+            let error = attempt_timeout(&json!({"timeout_ms": value})).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        }
+    }
 
     #[test]
     fn text_query_pages_are_bounded_and_resume_on_utf8_boundaries() {

@@ -93,6 +93,33 @@ fn kill_pet_and_wait(server: u32, project: &std::path::Path) -> u32 {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn wait_for_pid_exit(pid: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let state = fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("State:"))
+                    .map(str::to_owned)
+            });
+        if state.is_none()
+            || state
+                .as_deref()
+                .is_some_and(|line| line.contains("Z (zombie)"))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PET {pid} survived request cancellation: {state:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn official_stdio_transport_serves_initialize_and_tools_list() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
@@ -400,6 +427,192 @@ fn transport_loss_keeps_attachment_replays_trace_and_allows_retirement() {
 
     drop(input);
     assert!(child.wait().unwrap().success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn runaway_tactics_honor_fragment_deadlines_and_mcp_cancellation() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(
+        project.path().join("A.v"),
+        "Theorem t : forall P : Prop, P -> P. Admitted.\n",
+    )
+    .unwrap();
+    let source_before = fs::read(project.path().join("A.v")).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server_pid = child.id();
+    let mut input = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (responses_tx, responses_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            responses_tx
+                .send(serde_json::from_str::<serde_json::Value>(&line).unwrap())
+                .unwrap();
+        }
+    });
+    let send = |input: &mut std::process::ChildStdin, value: serde_json::Value| {
+        writeln!(input, "{value}").unwrap();
+        input.flush().unwrap();
+    };
+    let receive = |id: u64, timeout: std::time::Duration| {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("MCP response deadline expired");
+            let response = responses_rx
+                .recv_timeout(remaining)
+                .expect("MCP response deadline expired");
+            if response["id"] == id {
+                return response;
+            }
+        }
+    };
+    let call = |input: &mut std::process::ChildStdin,
+                id: u64,
+                name: &str,
+                arguments: serde_json::Value| {
+        send(
+            input,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":name,"arguments":arguments}
+            }),
+        );
+        receive(id, std::time::Duration::from_secs(5))["result"].clone()
+    };
+
+    send(
+        &mut input,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cancellation-test","version":"1"}}}),
+    );
+    assert_eq!(receive(1, std::time::Duration::from_secs(2))["id"], 1);
+    send(
+        &mut input,
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    assert_eq!(
+        call(
+            &mut input,
+            2,
+            "start",
+            serde_json::json!({"project_path":project.path()}),
+        )["isError"],
+        false
+    );
+    let target = serde_json::json!({"file":"A.v","qualified_path":["Demo","A","t"]});
+    let opened = call(
+        &mut input,
+        3,
+        "prove",
+        serde_json::json!({"target":target.clone()}),
+    );
+    assert_eq!(opened["isError"], false, "{opened}");
+    let root = opened["structuredContent"]["checkpoint"].as_u64().unwrap();
+
+    // Each alternative receives its own deadline. The first one destroys the
+    // PET epoch; the second is replayed from the same root and still runs.
+    let tried = call(
+        &mut input,
+        4,
+        "try",
+        serde_json::json!({
+            "attempts":["let rec loop n := loop n in loop 0.","idtac."],
+            "timeout_ms":50
+        }),
+    );
+    assert_eq!(tried["isError"], false, "{tried}");
+    assert_eq!(
+        tried["structuredContent"]["attempts"][0]["error"]["kind"], "proof_step_timeout",
+        "{tried}"
+    );
+    assert!(
+        tried["structuredContent"]["attempts"][1]["state"]
+            .get("checkpoint")
+            .is_none(),
+        "{tried}"
+    );
+    let after_try = call(&mut input, 5, "query", serde_json::json!({"kind":"goals"}));
+    assert_eq!(after_try["structuredContent"]["checkpoint"], root);
+
+    let checked = call(
+        &mut input,
+        6,
+        "check",
+        serde_json::json!({
+            "attempts":["let rec loop n := loop n in loop 0.","intros P H."],
+            "timeout_ms":50
+        }),
+    );
+    assert_eq!(checked["isError"], false, "{checked}");
+    assert_eq!(checked["structuredContent"]["selected"], 1, "{checked}");
+    assert_eq!(
+        checked["structuredContent"]["rejected"][0]["kind"], "proof_step_timeout",
+        "{checked}"
+    );
+    let checkpoint = checked["structuredContent"]["state"]["checkpoint"]
+        .as_u64()
+        .unwrap();
+    assert!(checkpoint > root);
+
+    // No wrapper deadline: protocol cancellation itself must preempt PET and
+    // release the serialized project/connection locks promptly.
+    let pet_before_cancel = pet_child_for_project(server_pid, project.path());
+    send(
+        &mut input,
+        serde_json::json!({
+            "jsonrpc":"2.0", "id":7, "method":"tools/call",
+            "params":{"name":"try","arguments":{"attempts":["let rec loop n := loop n in loop 0."]}}
+        }),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    send(
+        &mut input,
+        serde_json::json!({
+            "jsonrpc":"2.0", "method":"notifications/cancelled",
+            "params":{"requestId":7,"reason":"bounded regression"}
+        }),
+    );
+    // MCP declares a cancelled request's result unused, and rmcp may suppress
+    // its late response entirely. Observe the required side effect directly.
+    wait_for_pid_exit(pet_before_cancel);
+
+    let recovered = call(&mut input, 8, "query", serde_json::json!({"kind":"goals"}));
+    assert_eq!(recovered["isError"], false, "{recovered}");
+    assert_eq!(
+        recovered["structuredContent"]["checkpoint"], checkpoint,
+        "{recovered}"
+    );
+    let replacement_pet = pet_child_for_project(server_pid, project.path());
+    assert_ne!(replacement_pet, pet_before_cancel);
+    let abandoned = call(
+        &mut input,
+        9,
+        "abandon",
+        serde_json::json!({"target":target}),
+    );
+    assert_eq!(abandoned["isError"], false, "{abandoned}");
+
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    wait_for_pid_exit(replacement_pet);
+    reader.join().unwrap();
+    assert_eq!(fs::read(project.path().join("A.v")).unwrap(), source_before);
 }
 
 #[test]

@@ -160,6 +160,8 @@ mod tests {
             (ErrorKind::Ambiguous, "ambiguous"),
             (ErrorKind::DeclarationChanged, "declaration_changed"),
             (ErrorKind::ProofStepFailed, "proof_step_failed"),
+            (ErrorKind::ProofStepTimeout, "proof_step_timeout"),
+            (ErrorKind::RequestCancelled, "request_cancelled"),
             (ErrorKind::PetLost, "pet_lost"),
             (ErrorKind::QueryFailed, "query_failed"),
             (ErrorKind::PetFailure, "pet_failure"),
@@ -209,6 +211,14 @@ mod tests {
             .kind,
             ErrorKind::PetFailure
         );
+        assert_eq!(
+            pet_release_error(PetError::Cancelled).kind,
+            ErrorKind::RequestCancelled
+        );
+        assert_eq!(
+            pet_release_error(PetError::TimedOut { timeout_ms: 10 }).kind,
+            ErrorKind::ProofStepTimeout
+        );
     }
 
     #[test]
@@ -223,6 +233,21 @@ mod tests {
         assert_eq!(schema["properties"]["steps"]["minimum"], 1);
         assert_eq!(schema["properties"]["checkpoint"]["minimum"], 1);
         assert!(schema["properties"].get("to").is_none());
+    }
+
+    #[test]
+    fn proof_attempt_schemas_expose_one_optional_per_fragment_deadline() {
+        for name in ["check", "try"] {
+            let tool = tool_definitions()
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap();
+            let schema = serde_json::to_value(tool).unwrap()["inputSchema"].clone();
+            assert_eq!(schema["required"], json!(["attempts"]));
+            assert_eq!(schema["properties"]["timeout_ms"]["type"], "integer");
+            assert_eq!(schema["properties"]["timeout_ms"]["minimum"], 1);
+            assert_eq!(schema["additionalProperties"], false);
+        }
     }
 
     #[test]
