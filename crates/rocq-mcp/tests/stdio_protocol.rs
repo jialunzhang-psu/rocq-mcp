@@ -29,6 +29,70 @@ fn call_tool(
     response["result"].clone()
 }
 
+#[cfg(target_os = "linux")]
+fn pet_child_for_project(server: u32, project: &std::path::Path) -> u32 {
+    let project = project.to_string_lossy();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let tasks = fs::read_dir(format!("/proc/{server}/task")).unwrap();
+        for task in tasks.flatten() {
+            let children = fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            for child in children.split_whitespace() {
+                let Ok(pid) = child.parse::<u32>() else {
+                    continue;
+                };
+                let command = fs::read(format!("/proc/{pid}/cmdline"))
+                    .unwrap_or_default()
+                    .split(|byte| *byte == 0)
+                    .filter_map(|part| std::str::from_utf8(part).ok())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if command.contains("/pet") && command.contains(project.as_ref()) {
+                    return pid;
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PET child for {project} was not found"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_pet_and_wait(server: u32, project: &std::path::Path) -> u32 {
+    let pet = pet_child_for_project(server, project);
+    let status = Command::new("kill")
+        .args(["-KILL", &pet.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let state = fs::read_to_string(format!("/proc/{pet}/status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("State:"))
+                    .map(str::to_owned)
+            });
+        if state.is_none()
+            || state
+                .as_deref()
+                .is_some_and(|line| line.contains("Z (zombie)"))
+        {
+            return pet;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PET {pet} did not exit: {state:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn official_stdio_transport_serves_initialize_and_tools_list() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
@@ -167,6 +231,173 @@ fn missing_search_reference_is_not_configuration_and_keeps_the_proof_live() {
         serde_json::json!({"target":{"file":"A.v","qualified_path":["Demo","A","t"]}}),
     );
     assert_eq!(abandoned["isError"], false, "{abandoned}");
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn transport_loss_keeps_attachment_replays_trace_and_allows_retirement() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(
+        project.path().join("A.v"),
+        "Theorem t : forall P : Prop, P -> P. Admitted.\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server_pid = child.id();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"transport-recovery-test","version":"1"}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+
+    assert_eq!(
+        call_tool(
+            &mut input,
+            &mut output,
+            2,
+            "start",
+            serde_json::json!({"project_path":project.path()}),
+        )["isError"],
+        false
+    );
+    let target = serde_json::json!({"file":"A.v","qualified_path":["Demo","A","t"]});
+    let opened = call_tool(
+        &mut input,
+        &mut output,
+        3,
+        "prove",
+        serde_json::json!({"target":target.clone()}),
+    );
+    assert_eq!(opened["isError"], false, "{opened}");
+    let advanced = call_tool(
+        &mut input,
+        &mut output,
+        4,
+        "check",
+        serde_json::json!({"attempts":["intros P H."]}),
+    );
+    assert_eq!(advanced["isError"], false, "{advanced}");
+    let checkpoint = advanced["structuredContent"]["state"]["checkpoint"].clone();
+
+    let killed = kill_pet_and_wait(server_pid, project.path());
+    let lost = call_tool(
+        &mut input,
+        &mut output,
+        5,
+        "query",
+        serde_json::json!({"kind":"goals"}),
+    );
+    assert_eq!(lost["isError"], true, "{lost}");
+    assert_eq!(lost["structuredContent"]["kind"], "pet_lost", "{lost}");
+    let message = lost["structuredContent"]["message"].as_str().unwrap();
+    assert!(message.contains("Broken pipe"), "{message}");
+    assert!(message.contains("signal: 9 (SIGKILL)"), "{message}");
+
+    // No second `start` or `prove`: the connection attachment and checkpoint
+    // text survived, so the next safe operation replaces PET and replays the
+    // exact root-to-current path under the original checkpoint identity.
+    let replayed = call_tool(
+        &mut input,
+        &mut output,
+        6,
+        "query",
+        serde_json::json!({"kind":"goals"}),
+    );
+    assert_eq!(
+        replayed["isError"], false,
+        "killed PET {killed}: {replayed}"
+    );
+    assert_eq!(replayed["structuredContent"]["checkpoint"], checkpoint);
+    assert!(
+        replayed["structuredContent"]["goals"]
+            .as_str()
+            .is_some_and(|goals| goals.contains("P : Prop") && goals.contains("H : P")),
+        "{replayed}"
+    );
+
+    // A dead PET must not make explicit reattachment fail while releasing old
+    // integer IDs. Reattachment retires this proof but keeps the project.
+    kill_pet_and_wait(server_pid, project.path());
+    let restarted = call_tool(
+        &mut input,
+        &mut output,
+        7,
+        "start",
+        serde_json::json!({"project_path":project.path()}),
+    );
+    assert_eq!(restarted["isError"], false, "{restarted}");
+    let no_proof = call_tool(
+        &mut input,
+        &mut output,
+        8,
+        "query",
+        serde_json::json!({"kind":"goals"}),
+    );
+    assert_eq!(no_proof["structuredContent"]["kind"], "invalid_request");
+    assert_eq!(no_proof["structuredContent"]["message"], "call prove first");
+
+    // The same retirement rule applies to abandon: loss means the old IDs no
+    // longer exist, so abandonment succeeds and a replacement remains usable.
+    let reopened = call_tool(
+        &mut input,
+        &mut output,
+        9,
+        "prove",
+        serde_json::json!({"target":target.clone()}),
+    );
+    assert_eq!(reopened["isError"], false, "{reopened}");
+    kill_pet_and_wait(server_pid, project.path());
+    let abandoned = call_tool(
+        &mut input,
+        &mut output,
+        10,
+        "abandon",
+        serde_json::json!({"target":target}),
+    );
+    assert_eq!(abandoned["isError"], false, "{abandoned}");
+    let listed = call_tool(
+        &mut input,
+        &mut output,
+        11,
+        "list_decls",
+        serde_json::json!({"file":"A.v"}),
+    );
+    assert_eq!(listed["isError"], false, "{listed}");
+    assert_eq!(
+        listed["structuredContent"]["declarations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
     drop(input);
     assert!(child.wait().unwrap().success());
 }

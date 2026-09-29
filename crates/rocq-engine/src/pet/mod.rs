@@ -8,11 +8,13 @@ use crate::types::PetWorkspace;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
+    collections::VecDeque,
     fs,
-    io::{BufReader, Read, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::Mutex,
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{Arc, Mutex, mpsc},
+    thread::JoinHandle,
 };
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
@@ -669,7 +671,83 @@ struct PetProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr: Arc<Mutex<StderrTail>>,
+    stderr_reader: Option<JoinHandle<()>>,
+    lifeline: Option<PetLifeline>,
     next_id: u64,
+}
+
+/// Keeps the Linux thread that forked PET alive for exactly the child's
+/// lifetime.  Linux binds `PR_SET_PDEATHSIG` to the creating *thread*, not to
+/// the surrounding process; callers may themselves be short-lived worker
+/// threads.
+struct PetLifeline {
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for PetLifeline {
+    fn drop(&mut self) {
+        // Closing the channel is also a stop signal, but an explicit value
+        // documents the normal shutdown path.  Join before returning so a
+        // completed PET cannot leave a launcher thread behind.
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Bounded diagnostics from the PET child.  PET's stdout is the JSON-RPC
+/// channel, so stderr is the only safe place to collect an OCaml backtrace or
+/// fatal-signal report.  The reader runs independently; otherwise a verbose
+/// PET failure could fill the stderr pipe and make the transport failure look
+/// like a stdin deadlock.
+const MAX_STDERR_BYTES: usize = 16 * 1024;
+
+#[derive(Default)]
+struct StderrTail {
+    bytes: VecDeque<u8>,
+}
+
+impl StderrTail {
+    fn append(&mut self, bytes: &[u8]) {
+        let keep = MAX_STDERR_BYTES.min(bytes.len());
+        if bytes.len() > keep {
+            self.bytes.clear();
+        }
+        for byte in &bytes[bytes.len() - keep..] {
+            if self.bytes.len() == MAX_STDERR_BYTES {
+                self.bytes.pop_front();
+            }
+            self.bytes.push_back(*byte);
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut bytes = Vec::with_capacity(self.bytes.len());
+        let (first, second) = self.bytes.as_slices();
+        bytes.extend_from_slice(first);
+        bytes.extend_from_slice(second);
+        String::from_utf8_lossy(&bytes).trim().to_owned()
+    }
+}
+
+fn drain_stderr(mut stderr: ChildStderr, capture: Arc<Mutex<StderrTail>>) {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match stderr.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(length) => {
+                let mut tail = capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                tail.append(&buffer[..length]);
+            }
+        }
+    }
 }
 
 impl PetProcess {
@@ -681,39 +759,11 @@ impl PetProcess {
             .arg(workspace)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-            #[cfg(target_os = "linux")]
-            {
-                // Design note: a forced MCP/server crash must not orphan a
-                // PET process holding a large Rocq environment.  Install the
-                // kernel parent-death signal before exec.  PET is also placed
-                // in its own process group so normal shutdown can reap all of
-                // its descendants.
-                unsafe {
-                    command.pre_exec(move || {
-                        let result = nix::libc::prctl(
-                            nix::libc::PR_SET_PDEATHSIG,
-                            nix::libc::SIGKILL,
-                            0,
-                            0,
-                            0,
-                        );
-                        if result == -1 {
-                            Err(std::io::Error::last_os_error())
-                        } else {
-                            Ok(())
-                        }
-                    });
-                }
-            }
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|_| PetError::Environment("PET executable is unavailable".into()))?;
+            .stderr(Stdio::piped());
+        configure_pet_command(&mut command);
+        let (mut child, lifeline) = spawn_pet_child(command).map_err(|error| {
+            PetError::Environment(format!("PET executable is unavailable: {error}"))
+        })?;
         let stdin = child.stdin.take().ok_or_else(|| {
             terminate_child(&mut child);
             PetError::ProcessLost("PET stdin is unavailable".into())
@@ -722,10 +772,26 @@ impl PetProcess {
             terminate_child(&mut child);
             PetError::ProcessLost("PET stdout is unavailable".into())
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            terminate_child(&mut child);
+            PetError::ProcessLost("PET stderr is unavailable".into())
+        })?;
+        let stderr_capture = Arc::new(Mutex::new(StderrTail::default()));
+        let capture = Arc::clone(&stderr_capture);
+        let stderr_reader = std::thread::Builder::new()
+            .name("rocq-pet-stderr".into())
+            .spawn(move || drain_stderr(stderr, capture))
+            .map_err(|error| {
+                terminate_child(&mut child);
+                PetError::Environment(format!("PET stderr reader is unavailable: {error}"))
+            })?;
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            stderr: stderr_capture,
+            stderr_reader: Some(stderr_reader),
+            lifeline,
             next_id: 1,
         })
     }
@@ -743,14 +809,166 @@ impl PetProcess {
         if request.len() > MAX_REQUEST_BYTES {
             return Err(PetError::Invalid("PET request is oversized".into()));
         }
-        write_frame(&mut self.stdin, &request)?;
-        read_response(&mut self.stdout, id)
+        write_frame(&mut self.stdin, &request)
+            .map_err(|error| self.transport_error("stdin write", error))?;
+        read_response(&mut self.stdout, id).map_err(|error| self.annotate_transport(error))
+    }
+
+    fn annotate_transport(&mut self, error: PetError) -> PetError {
+        if !error.is_transport_loss() {
+            return error;
+        }
+        let detail = self.process_diagnostic();
+        match error {
+            PetError::ProcessLost(message) => PetError::ProcessLost(format!("{message}; {detail}")),
+            PetError::Protocol(message) => PetError::Protocol(format!("{message}; {detail}")),
+            PetError::OutputOverflow => {
+                PetError::Protocol(format!("PET response exceeded the output limit; {detail}"))
+            }
+            other => other,
+        }
+    }
+
+    fn transport_error(&mut self, operation: &str, error: io::Error) -> PetError {
+        PetError::ProcessLost(format!(
+            "PET {operation} failed: {error}; {}",
+            self.process_diagnostic()
+        ))
+    }
+
+    fn process_diagnostic(&mut self) -> String {
+        // Pipe EOF/EPIPE can become visible a few scheduler ticks before
+        // `waitpid`. A short diagnostics-only grace captures the real exit
+        // code without imposing a correctness timeout on PET execution.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(25);
+        let observed = loop {
+            match self.child.try_wait() {
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => break result,
+            }
+        };
+        let (status, exited) = match observed {
+            Ok(Some(status)) => (format!("child exited with {status}"), true),
+            Ok(None) => ("child is still running".to_owned(), false),
+            Err(error) => (format!("child status unavailable: {error}"), false),
+        };
+        // Once the process has exited, joining the drain is nonblocking and
+        // guarantees that a fatal OCaml diagnostic is not lost to a race
+        // between `waitpid` and the stderr reader.
+        if exited && let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+        let stderr = self
+            .stderr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .text();
+        if stderr.is_empty() {
+            status
+        } else {
+            format!("{status}; stderr: {stderr}")
+        }
     }
 }
 
 impl Drop for PetProcess {
     fn drop(&mut self) {
         terminate_child(&mut self.child);
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+        // Exit the stable launcher only after PET has been killed and reaped;
+        // its parent-death signal is then harmless rather than the mechanism
+        // used for normal shutdown.
+        self.lifeline.take();
+    }
+}
+
+/// Apply child-only process controls. PET owns a separate process group so
+/// normal shutdown can terminate descendants, while Linux additionally kills
+/// PET if the complete MCP process disappears.
+fn configure_pet_command(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        #[cfg(target_os = "linux")]
+        {
+            let server_pid = unsafe { nix::libc::getpid() };
+            // Design note: `PR_SET_PDEATHSIG` observes the thread that calls
+            // `fork`, so `spawn_pet_child` performs this spawn on a stable
+            // lifeline thread rather than on Tokio's ephemeral blocking
+            // worker. Checking `getppid` closes the process-death race between
+            // `fork` and this pre-exec hook.
+            unsafe {
+                command.pre_exec(move || {
+                    if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL, 0, 0, 0)
+                        == -1
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if nix::libc::getppid() != server_pid {
+                        // `pre_exec` may call only async-signal-safe code; use
+                        // a raw errno rather than allocating a custom error.
+                        return Err(io::Error::from_raw_os_error(nix::libc::ECHILD));
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+}
+
+/// Spawn PET and return both its process handle and the stable creator-thread
+/// owner required by Linux parent-death semantics. On non-Linux platforms no
+/// parent-death signal is installed, so a launcher thread would add no value.
+fn spawn_pet_child(mut command: Command) -> io::Result<(Child, Option<PetLifeline>)> {
+    #[cfg(target_os = "linux")]
+    {
+        let (child_tx, child_rx) = mpsc::sync_channel(0);
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("rocq-pet-lifeline".into())
+            .spawn(move || match command.spawn() {
+                Ok(child) => match child_tx.send(Ok(child)) {
+                    Ok(()) => {
+                        // Both an explicit message and sender disconnection
+                        // end the lifeline. In either case thread termination
+                        // activates PET's parent-death signal.
+                        let _ = stop_rx.recv();
+                    }
+                    Err(mpsc::SendError(Ok(mut child))) => {
+                        // The caller vanished before taking ownership.
+                        terminate_child(&mut child);
+                    }
+                    Err(mpsc::SendError(Err(_))) => {}
+                },
+                Err(error) => {
+                    let _ = child_tx.send(Err(error));
+                }
+            })?;
+        let child = match child_rx.recv() {
+            Ok(Ok(child)) => child,
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = thread.join();
+                return Err(io::Error::other("PET launcher exited before spawn"));
+            }
+        };
+        let lifeline = PetLifeline {
+            stop: Some(stop_tx),
+            thread: Some(thread),
+        };
+        Ok((child, Some(lifeline)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        command.spawn().map(|child| (child, None))
     }
 }
 
@@ -781,13 +999,10 @@ fn decode_goals(value: &Value) -> Result<PetGoals, PetError> {
     }
 }
 
-fn write_frame(writer: &mut ChildStdin, body: &[u8]) -> Result<(), PetError> {
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())
-        .map_err(|_| PetError::ProcessLost("PET stdin write failed".into()))?;
-    writer
-        .write_all(body)
-        .and_then(|_| writer.flush())
-        .map_err(|_| PetError::ProcessLost("PET stdin write failed".into()))
+fn write_frame(writer: &mut ChildStdin, body: &[u8]) -> io::Result<()> {
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(body)?;
+    writer.flush()
 }
 
 fn read_response(reader: &mut BufReader<ChildStdout>, request_id: u64) -> Result<Value, PetError> {
@@ -833,9 +1048,11 @@ fn read_response(reader: &mut BufReader<ChildStdout>, request_id: u64) -> Result
         return Err(PetError::OutputOverflow);
     }
     let mut body = vec![0; length];
-    reader
-        .read_exact(&mut body)
-        .map_err(|_| PetError::ProcessLost("PET stdout closed".into()))?;
+    reader.read_exact(&mut body).map_err(|error| {
+        PetError::ProcessLost(format!(
+            "PET stdout body read failed after Content-Length {length}: {error}"
+        ))
+    })?;
     let mut deserializer = serde_json::Deserializer::from_slice(&body);
     deserializer.disable_recursion_limit();
     let value = Value::deserialize(&mut deserializer)
@@ -898,9 +1115,9 @@ fn read_line_bounded(
 ) -> Result<(), PetError> {
     loop {
         let mut byte = [0];
-        reader
-            .read_exact(&mut byte)
-            .map_err(|_| PetError::ProcessLost("PET stdout closed".into()))?;
+        reader.read_exact(&mut byte).map_err(|error| {
+            PetError::ProcessLost(format!("PET stdout header read failed: {error}"))
+        })?;
         line.push(byte[0]);
         if byte[0] == b'\n' {
             return Ok(());
@@ -948,6 +1165,12 @@ fn source_position(source: &str, offset: usize) -> Result<Value, PetError> {
 }
 
 fn terminate_child(child: &mut Child) {
+    // `process_diagnostic` may already have reaped an exited child. Avoid a
+    // process-group signal with a stale numeric PID, which could otherwise be
+    // reused between diagnosis and Drop.
+    if child.try_wait().is_ok_and(|status| status.is_some()) {
+        return;
+    }
     #[cfg(unix)]
     {
         use nix::{
@@ -966,6 +1189,151 @@ mod results;
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Write a minimal framed JSON-RPC PET double. `after_handshake` runs
+    /// immediately after the capabilities response; `on_request` owns every
+    /// later request and must either reply or terminate the process.
+    fn fake_pet(directory: &tempfile::TempDir, after_handshake: &str, on_request: &str) -> PathBuf {
+        fn python_block(source: &str) -> String {
+            let source = if source.is_empty() { "pass" } else { source };
+            source
+                .lines()
+                .map(|line| format!("        {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let script = directory.path().join("fake-pet.py");
+        let capabilities = serde_json::to_string(REQUIRED_CAPABILITIES).unwrap();
+        let source = format!(
+            r#"#!/usr/bin/env python3
+import json
+import os
+import signal
+import sys
+
+CAPABILITIES = {capabilities}
+
+def read_request():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\n", b"\r\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        if name.lower() == "content-length":
+            length = int(value.strip())
+    return json.loads(sys.stdin.buffer.read(length))
+
+def reply(request, result):
+    payload = {{"jsonrpc":"2.0", "id":request["id"], "result":result}}
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(("Content-Length: %d\r\n\r\n" % len(body)).encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    request = read_request()
+    if request["method"] == "petanque/capabilities":
+        reply(request, CAPABILITIES)
+{after_handshake}
+    else:
+{on_request}
+"#,
+            after_handshake = python_block(after_handshake),
+            on_request = python_block(on_request),
+        );
+        fs::write(&script, source).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    fn wait_until_exited(child: &mut Child) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake PET did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pet_outlives_the_ephemeral_thread_that_requested_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = fake_pet(&directory, "", r#"reply(request, {"alive": True})"#);
+        let workspace = directory.path().to_owned();
+        let (process_tx, process_rx) = mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            let mut process = PetProcess::spawn(&workspace, &script).unwrap();
+            handshake(&mut process).unwrap();
+            process_tx.send(process).unwrap();
+        });
+        let mut process = process_rx.recv().unwrap();
+        worker.join().unwrap();
+
+        // Regression: before the stable launcher existed, Linux treated the
+        // now-exited worker as PET's pdeath parent and sent SIGKILL here.
+        assert_eq!(
+            process.rpc("test/alive", json!({})).unwrap(),
+            json!({"alive": true})
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stdin_epipe_reports_signal_and_bounded_stderr_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let after_handshake = format!(
+            "sys.stderr.write('BEGIN-MUST-BE-DROPPED\\n' + 'x' * {} + '\\nEND-OF-STDERR\\n')\n\
+             sys.stderr.flush()\n\
+             os.kill(os.getpid(), signal.SIGKILL)",
+            MAX_STDERR_BYTES * 2
+        );
+        let script = fake_pet(&directory, &after_handshake, "reply(request, None)");
+        let mut process = PetProcess::spawn(directory.path(), &script).unwrap();
+        handshake(&mut process).unwrap();
+        wait_until_exited(&mut process.child);
+
+        let error = process.rpc("test/after-exit", json!({})).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Broken pipe (os error 32)"), "{message}");
+        assert!(message.contains("signal: 9 (SIGKILL)"), "{message}");
+        assert!(message.contains("END-OF-STDERR"), "{message}");
+        assert!(!message.contains("BEGIN-MUST-BE-DROPPED"), "{message}");
+        assert!(message.len() <= MAX_STDERR_BYTES + 256, "{message}");
+    }
+
+    #[test]
+    fn stdout_eof_reports_exit_status_and_stderr() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = fake_pet(
+            &directory,
+            "",
+            "sys.stderr.write('EOF-DIAGNOSTIC\\n')\n\
+             sys.stderr.flush()\n\
+             sys.exit(23)",
+        );
+        let mut process = PetProcess::spawn(directory.path(), &script).unwrap();
+        handshake(&mut process).unwrap();
+
+        let error = process.rpc("test/eof", json!({})).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("PET stdout header read failed"),
+            "{message}"
+        );
+        assert!(message.contains("failed to fill whole buffer"), "{message}");
+        assert!(message.contains("exit status: 23"), "{message}");
+        assert!(message.contains("EOF-DIAGNOSTIC"), "{message}");
+    }
 
     #[test]
     fn stable_remote_codes_are_decoded_without_message_inspection() {

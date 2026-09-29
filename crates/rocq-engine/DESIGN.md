@@ -168,6 +168,15 @@ per-file PET instance.
 and request IDs. It serializes RPC operations for that process. No other code
 writes to the PET pipe or kills/restarts the process.
 
+On Linux, PET is forked by a dedicated lifeline thread that remains alive for
+the exact lifetime of that child. This is required because
+`PR_SET_PDEATHSIG` follows the thread that called `fork`, not merely the
+surrounding process: spawning PET directly from Tokio's temporary blocking
+pool would make the pool's ten-second idle retirement send PET `SIGKILL`.
+Normal actor drop kills and reaps PET's process group before ending the
+lifeline; an abrupt MCP process exit ends the lifeline and lets the kernel
+parent-death signal prevent an orphan.
+
 Serial execution provides the process-lifecycle invariant needed for crash
 recovery. `PetActor` reports process loss but never reaches into MCP session
 state; the `rocq-mcp` project coordinator sequences these steps:
@@ -433,7 +442,11 @@ enumerate the now-unreachable checkpoint nodes and send their exact IDs in one
 batch. PET release never walks descendants.
 
 If a release RPC loses the PET transport, the old IDs are discarded; they
-must not be retried against the replacement process.
+must not be retried against the replacement process. Explicit `abandon` or
+`start` retirement therefore succeeds, clears the retiring proof, and tells
+the project coordinator to invalidate sibling-session IDs; it does not report
+a failure merely because the already-dead process could not acknowledge IDs
+that no longer exist.
 
 ## 9. Crash recovery and lazy replay
 

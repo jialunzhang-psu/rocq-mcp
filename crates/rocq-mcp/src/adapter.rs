@@ -209,11 +209,9 @@ fn start(
                 .selection
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Err(error) = retire_proof(&previous, &mut selection) {
-                if error.kind == ErrorKind::PetLost {
-                    runtime.invalidate_project_states(&previous, session, &mut selection);
-                }
-                return Err(error);
+            let pet_epoch_lost = retire_proof(&previous, &mut selection)?;
+            if pet_epoch_lost {
+                runtime.invalidate_project_states(&previous, session, &mut selection);
             }
             install_start_view(runtime, session, &next, &mut selection)?;
             return Ok(json!({}));
@@ -227,11 +225,9 @@ fn start(
             .selection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Err(error) = retire_proof(&previous, &mut selection) {
-            if error.kind == ErrorKind::PetLost {
-                runtime.invalidate_project_states(&previous, session, &mut selection);
-            }
-            return Err(error);
+        let pet_epoch_lost = retire_proof(&previous, &mut selection)?;
+        if pet_epoch_lost {
+            runtime.invalidate_project_states(&previous, session, &mut selection);
         }
         selection.project = None;
     }
@@ -346,7 +342,9 @@ fn dispatch_attached(
                     "no active unpublished proof has that declaration",
                 ));
             }
-            retire_proof(project, selection)?;
+            if retire_proof(project, selection)? {
+                runtime.invalidate_project_states(project, session, selection);
+            }
             Ok(json!({}))
         }
         "check" => check(runtime, session, project, selection, args),
@@ -948,7 +946,12 @@ fn release_staged(
         .map_err(pet_release_error)
 }
 
-fn retire_proof(project: &ProjectRuntime, selection: &mut Selection) -> Result<(), Error> {
+/// Retire the selected proof and release its live PET IDs. The boolean result
+/// is true only when release discovered that the complete PET epoch was
+/// already lost; callers must then invalidate state IDs in sibling sessions.
+/// A lost epoch still counts as successful retirement because none of its IDs
+/// can remain allocated or be safely retried against a replacement process.
+fn retire_proof(project: &ProjectRuntime, selection: &mut Selection) -> Result<bool, Error> {
     let states = selection.checkpoints.proof.as_ref().map(|proof| {
         proof
             .checkpoints
@@ -959,17 +962,21 @@ fn retire_proof(project: &ProjectRuntime, selection: &mut Selection) -> Result<(
     if let Some(states) = states {
         if let Err(error) = project.actor().release_states(&states) {
             // Design note: a lost PET has already discarded every exported
-            // state when its process owner was dropped.  Keep the proof only
-            // for a live-process protocol error; the caller will invalidate
-            // all project sessions for a transport loss.
+            // state when its process owner was dropped.  Treat retirement as
+            // successful in that epoch: retrying those integer IDs against a
+            // replacement PET is unsound, and making `start`/`abandon` fail
+            // leaves a stale selection that cannot be used or explicitly
+            // discarded.  The project-wide invalidation still happens at the
+            // caller, which owns the shared session registry.
             if error.is_transport_loss() {
                 selection.checkpoints.clear();
+                return Ok(true);
             }
             return Err(pet_release_error(error));
         }
         selection.checkpoints.clear();
     }
-    Ok(())
+    Ok(false)
 }
 
 fn declaration_kind(value: Option<&str>) -> Result<DeclarationKind, Error> {

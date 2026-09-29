@@ -27,6 +27,15 @@ and `try` can also return errors *inside* their result, preserving
 ordered-alternative diagnostics without turning a rejected proof fragment into
 a protocol failure.
 
+`pet_lost` means the in-flight PET request lost its child or JSON-RPC
+transport. The server does not blindly repeat that request because a pipe can
+fail after PET has consumed a state-changing proof command. It does retain the
+MCP attachment and checkpoint text, invalidates every state ID for that
+project, and lazily starts/replays PET on the next safe request. A restarted
+MCP server/connection is a different session and still requires `start`.
+Transport diagnostics preserve the OS error, child exit status or signal, and
+a bounded stderr tail when available.
+
 ## `start`
 
 ```json
@@ -39,6 +48,9 @@ start a workspace-wide PET declaration index. Call `list_files`, then
 view under the shared project barrier. Reattaching the same workspace retires
 this connection's selected proof; if Dune's view changed, all connections keep
 their checkpoint text but discard the old PET state handles for lazy replay.
+If PET was already lost while retiring this connection's proof, its old IDs no
+longer exist: retirement succeeds, sibling sessions discard their stale IDs,
+and the attachment is installed normally.
 
 | Error kind | When |
 |---|---|
@@ -46,7 +58,6 @@ their checkpoint text but discard the old PET state handles for lazy replay.
 | `invalid_configuration` | Unavailable path, invalid layout, or unusable project environment. |
 | `ambiguous` | More than one project layout applies. |
 | `project_timeout` | Dune project discovery or description timed out. |
-| `pet_lost` | Retiring a selected proof lost the project PET child or transport. |
 | `pet_failure` | PET reported an anomaly, system failure, or unknown remote error while retiring a proof. |
 
 ## `list_files`
@@ -204,14 +215,15 @@ assumption is never reported as completed. If a proof is already active,
 
 Discards one uniquely identified unpublished proof. Its in-memory proof session
 and PET state handles are retired; it never deletes source code. Returns `{}`
-and clears the connection's selected proof.
+and clears the connection's selected proof. If the PET epoch was already lost,
+the integer state IDs are already gone, so abandonment still succeeds and
+invalidates stale IDs held by sibling sessions.
 
 | Error kind | When |
 |---|---|
 | `invalid_request` | No project, invalid name, or extra argument. |
 | `not_found` | No active unpublished proof has the name. |
 | `ambiguous` | More than one unpublished proof has the exact identity. |
-| `pet_lost` | Retiring the proof lost the project PET child or transport. |
 | `pet_failure` | PET reported an anomaly, system failure, or unknown remote error while retiring the proof. |
 | `invalid_configuration` | The project or in-memory proof state is unavailable. |
 
