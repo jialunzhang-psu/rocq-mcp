@@ -126,7 +126,7 @@ provide it.
 
 ## 5. Project and PET process model
 
-### 5.1 One PET process per active project
+### 5.1 At most one PET process per active project
 
 The server supports multiple projects by creating multiple PET instances:
 
@@ -144,9 +144,9 @@ struct ProjectRuntime {
 ```
 
 `ProjectId` is Dune's canonical workspace root. It is not a guessed directory
-name. Two connections attached to the
-same `ProjectId` share the same PET process. Different projects use different
-PET processes and may execute concurrently.
+name. Two connections attached to the same `ProjectId` share the same lazily
+created PET process once a PET-backed operation needs it. Different projects
+use different PET processes and may execute concurrently.
 
 The typed Dune view is a cache, not a second project authority. Under the
 project operation barrier, every admitted MCP operation first computes a cheap
@@ -154,10 +154,12 @@ filesystem layout probe over Dune configuration files and the selected source
 set. Only when that probe changes does the runtime re-query Dune for selected
 files, logical libraries, native targets, and PET load paths. If that typed view
 changed, the runtime installs it atomically, replaces the PET epoch, and clears
-every session's state IDs before continuing. Initial `start` discovery and a
-later `start` reattachment use the same barrier and probe rule. A failed Dune
-query fails the request without falling back to the previous view, filesystem
-configuration scanning, or conventional directory names.
+every session's state IDs before continuing. Every `start` first resolves the
+requested path through Dune; after that initial attachment, ordinary operations
+use the cheap probe, and the reattachment install is still serialized by the
+same project barrier. A failed Dune query fails the request without falling
+back to the previous view, filesystem configuration scanning, or conventional
+directory names.
 
 The PET process is started lazily on the first PET-backed operation. A project
 with no attached connections and no operation in flight is removed and its
@@ -935,7 +937,8 @@ The redesign is complete only when all of the following hold.
 - Production code has no `AttemptId`, `ProjectLane`, `ProjectPool`,
   `CachedReplay`, or `DisposablePet`.
 - There is no wrapper source walker, scope stack, or declaration catalogue.
-- One project runtime owns exactly one PET child process.
+- One project runtime owns at most one PET child process; it may have no child
+  until the first PET-backed operation starts one.
 - No MCP response contains an exported PET checkpoint/state handle; the
   documented epoch-scoped goal IDs are observational and are not releaseable
   PET state handles.
@@ -972,7 +975,8 @@ The redesign is complete only when all of the following hold.
 
 ### Lifecycle and recovery
 
-- same-project connections share one PET process;
+- same-project connections share one lazily created PET process when one is
+  running;
 - two active projects use two independent PET processes;
 - killing one PET invalidates only that project's state IDs;
 - successful writeback also invalidates every pre-write state ID before the

@@ -84,12 +84,12 @@ is `request_cancelled`; normally the cancelling client discards it.
 
 Returns `{}`. It attaches the Dune workspace and does not start a
 workspace-wide PET declaration index. Call `list_files`, then
-`list_decls(file)` to discover a target. Initial attachment performs Dune
-discovery; later calls use the shared project barrier and a cheap layout probe,
-rerunning Dune discovery only when that probe changes. Reattaching the same
-workspace retires this connection's selected proof; if Dune's view changed, all
-connections keep their checkpoint text but discard the old PET state handles
-for lazy replay.
+`list_decls(file)` to discover a target. Each `start` resolves its requested
+path through Dune; after attachment, ordinary project calls use the shared
+project barrier and a cheap layout probe, rerunning Dune discovery only when
+that probe changes. Reattaching the same workspace retires this connection's
+selected proof; if Dune's view changed, all connections keep their checkpoint
+text but discard the old PET state handles for lazy replay.
 If PET was already lost while retiring this connection's proof, its old IDs no
 longer exist: retirement succeeds, sibling sessions discard their stale IDs,
 and the attachment is installed normally.
