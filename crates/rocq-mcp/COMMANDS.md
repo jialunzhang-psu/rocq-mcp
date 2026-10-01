@@ -243,7 +243,9 @@ consumer `.vo`. If the source, `.vo`, or `.glob` fingerprint changes (including
 a rebuild caused only by a transitive dependency), the server changes the PET
 epoch and leaves every retained checkpoint replayable. This is automatic; do
 not run `dune clean` or replace PET manually after an inconsistent-assumptions
-diagnostic.
+diagnostic. The first creation of a previously absent `.vo`/`.glob` is the one
+exception: no live PET state could have loaded that artifact, so it is recorded
+without invalidating the current epoch.
 
 With `structured:true`, an open state additionally contains
 `structured_goals:{focused,stack,unfocused,shelved,given_up,next_bullet}`. Each
