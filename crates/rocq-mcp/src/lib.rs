@@ -90,7 +90,9 @@ mod tests {
                 "assumptions",
                 "dependencies",
                 "type",
-                "notations"
+                "notations",
+                "locate_symbol",
+                "progress"
             ])
         );
         for field in [
@@ -101,6 +103,11 @@ mod tests {
             "scope",
             "goal_id",
             "offset",
+            "symbol",
+            "limit",
+            "generation",
+            "diff",
+            "structured",
         ] {
             assert!(value["inputSchema"]["properties"].get(field).is_some());
         }
@@ -172,6 +179,7 @@ mod tests {
             (ErrorKind::RequestCancelled, "request_cancelled"),
             (ErrorKind::PetLost, "pet_lost"),
             (ErrorKind::QueryFailed, "query_failed"),
+            (ErrorKind::QueryTimeout, "query_timeout"),
             (ErrorKind::PetFailure, "pet_failure"),
             (ErrorKind::ProjectTimeout, "project_timeout"),
             (ErrorKind::BuildTimeout, "build_timeout"),
@@ -200,6 +208,24 @@ mod tests {
                 "{kind:?}: {projected}"
             );
         }
+
+        let resolution = Error::new(ErrorKind::InvalidDeclaration, "missing")
+            .semantic()
+            .with_resolution(json!({
+                "kind": "missing_identifier",
+                "suggested_imports": ["Require Import Demo.A."]
+            }));
+        assert_eq!(
+            public_error(&resolution),
+            json!({
+                "kind": "invalid_declaration",
+                "message": "missing",
+                "resolution": {
+                    "kind": "missing_identifier",
+                    "suggested_imports": ["Require Import Demo.A."]
+                }
+            })
+        );
 
         let semantic = Error::new(ErrorKind::QueryFailed, "Rocq: unknown reference").semantic();
         assert_eq!(
@@ -329,6 +355,8 @@ mod tests {
             assert_eq!(schema["required"], json!(["attempts"]));
             assert_eq!(schema["properties"]["timeout_ms"]["type"], "integer");
             assert_eq!(schema["properties"]["timeout_ms"]["minimum"], 1);
+            assert_eq!(schema["properties"]["trace"]["type"], "boolean");
+            assert_eq!(schema["properties"]["structured"]["type"], "boolean");
             assert_eq!(schema["additionalProperties"], false);
         }
     }
@@ -550,6 +578,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attached.actor().diagnostic_state_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn query_rebuilds_reverse_dependency_before_pet_consumes_it() {
+        let project = dune_project(
+            "Demo",
+            &[
+                (
+                    "A.v",
+                    "Definition base : nat := 0.\n\
+                     Theorem base_zero : base = 0. Proof. reflexivity. Qed.\n",
+                ),
+                (
+                    "B.v",
+                    "From Demo Require Import A.\n\
+                     Theorem consumer : base = 0. Proof. exact base_zero. Qed.\n",
+                ),
+            ],
+        );
+        let runtime = runtime();
+        let server = attach(&runtime, &project);
+        let target = json!({
+            "file":"B.v",
+            "qualified_path":["Demo","B","consumer"]
+        });
+        let first = dispatch(
+            &runtime,
+            &server.session,
+            "query",
+            json!({"kind":"assumptions","target":target.clone()}),
+        )
+        .unwrap();
+        assert!(first["text"].as_str().unwrap().contains("Closed"));
+
+        // Change only the dependency source.  B's cached source and artifact
+        // still look current to a wrapper-side fingerprint; the second query
+        // must nevertheless ask Dune to rebuild B, then cross a PET epoch
+        // before loading the new dependency assumptions.
+        fs::write(
+            project.path().join("A.v"),
+            "Definition base : nat := 0.\n\
+             Definition newly_added : nat := 1.\n\
+             Theorem base_zero : base = 0. Proof. reflexivity. Qed.\n",
+        )
+        .unwrap();
+        let second = dispatch(
+            &runtime,
+            &server.session,
+            "query",
+            json!({"kind":"assumptions","target":target}),
+        )
+        .unwrap();
+        assert!(second["text"].as_str().unwrap().contains("Closed"));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! semantic queries. This module owns only JSON-RPC framing and child-process
 //! lifecycle; it contains no proof graph, source scanner, or replay cache.
 
+use crate::request;
 use crate::types::{GoalFocus, GoalStackFrame, PetWorkspace, ProofDiagnostic};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,6 +31,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "structured_assumptions_v1",
     "typed_errors_v1",
     "diagnostic_ranges_v1",
+    "traced_run_v1",
 ];
 
 fn configured_pet_binary() -> PathBuf {
@@ -333,6 +335,51 @@ pub(crate) struct PetExecution {
     pub(crate) goals: PetGoals,
 }
 
+/// One Rocq-parser sentence boundary from a speculative traced run.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct PetTraceStep {
+    pub(crate) sentence_index: usize,
+    pub(crate) byte_start: usize,
+    pub(crate) byte_end: usize,
+    pub(crate) command: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PetTraceFailure {
+    pub(crate) error: PetError,
+    pub(crate) sentence_index: usize,
+    pub(crate) sentence_range: ProofDiagnostic,
+    pub(crate) before_state: PetStateId,
+    pub(crate) before_goals: PetGoals,
+    pub(crate) trace: Vec<PetTraceStep>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PetTraceOutcome {
+    Success(PetExecution),
+    Failure(PetTraceFailure),
+}
+
+#[derive(Deserialize)]
+struct RawTraceResponse {
+    st: Option<u64>,
+    proof_finished: bool,
+    failure: Option<RawTraceFailure>,
+}
+
+#[derive(Deserialize)]
+struct RawTraceFailure {
+    code: i64,
+    message: String,
+    sentence_index: usize,
+    sentence_start: usize,
+    sentence_end: usize,
+    diagnostic_start: Option<usize>,
+    diagnostic_end: Option<usize>,
+    before: u64,
+    trace: Vec<PetTraceStep>,
+}
+
 /// One record returned by PET's whole-document declaration endpoint. `kind`
 /// also admits `Axiom` internally so writeback can audit trust without a Rust
 /// source scanner; public discovery filters unsupported proof kinds.
@@ -520,6 +567,118 @@ impl PetActor {
         }
         let value = value?;
         self.materialize_run(value)
+    }
+
+    /// Execute through PET's sentence-aware speculative endpoint.  A command
+    /// rejection is returned as data so the parser-derived sentence index and
+    /// immutable pre-failure goal state survive JSON-RPC framing.  Every state
+    /// in the result is exported and must be released or retained explicitly
+    /// by the caller.
+    pub(crate) fn run_traced_with_timeout(
+        &self,
+        state: PetStateId,
+        fragment: &str,
+        include_trace: bool,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<PetTraceOutcome, PetError> {
+        if fragment.len() > MAX_REQUEST_BYTES / 2 {
+            return Err(PetError::Invalid("proof fragment is oversized".into()));
+        }
+        let value = self.call_live_with_timeout(
+            "petanque/run_trace",
+            json!({
+                "st": state.get(),
+                "tac": fragment,
+                "include_trace": include_trace,
+            }),
+            timeout,
+        )?;
+        let raw: RawTraceResponse = serde_json::from_value(value).map_err(|error| {
+            let error = PetError::Protocol(format!("invalid PET traced-run response: {error}"));
+            self.poison_if_invalidated(&error);
+            error
+        })?;
+        match (raw.st, raw.failure) {
+            (Some(st), None) => {
+                let execution = self.materialize_run(json!({
+                    "st": st,
+                    "proof_finished": raw.proof_finished,
+                }))?;
+                Ok(PetTraceOutcome::Success(execution))
+            }
+            (None, Some(failure)) if !raw.proof_finished => {
+                if failure.sentence_start > failure.sentence_end
+                    || failure.sentence_end > fragment.len()
+                    || !fragment.is_char_boundary(failure.sentence_start)
+                    || !fragment.is_char_boundary(failure.sentence_end)
+                    || failure.trace.len() > 64
+                    || failure.trace.iter().any(|step| {
+                        step.byte_start > step.byte_end
+                            || step.byte_end > fragment.len()
+                            || !fragment.is_char_boundary(step.byte_start)
+                            || !fragment.is_char_boundary(step.byte_end)
+                            || step.command.len() > 4096
+                    })
+                {
+                    let error = PetError::Protocol(
+                        "PET traced-run range is outside the submitted fragment".into(),
+                    );
+                    self.poison_if_invalidated(&error);
+                    return Err(error);
+                }
+                let diagnostic = match (failure.diagnostic_start, failure.diagnostic_end) {
+                    (Some(byte_start), Some(byte_end))
+                        if byte_start <= byte_end
+                            && byte_end <= fragment.len()
+                            && fragment.is_char_boundary(byte_start)
+                            && fragment.is_char_boundary(byte_end) =>
+                    {
+                        Some(ProofDiagnostic {
+                            byte_start,
+                            byte_end,
+                        })
+                    }
+                    (None, None) => None,
+                    _ => {
+                        let error =
+                            PetError::Protocol("PET traced-run diagnostic range is invalid".into());
+                        self.poison_if_invalidated(&error);
+                        return Err(error);
+                    }
+                };
+                let before_state = PetStateId::new(failure.before);
+                let before_goals = match self.goals(before_state) {
+                    Ok(goals) => goals,
+                    Err(error) => {
+                        let _ = self.release_states(&[before_state]);
+                        return Err(error);
+                    }
+                };
+                Ok(PetTraceOutcome::Failure(PetTraceFailure {
+                    error: PetError::Remote {
+                        code: failure.code,
+                        kind: PetRemoteKind::from_code(failure.code),
+                        message: failure.message,
+                        diagnostic,
+                    },
+                    sentence_index: failure.sentence_index,
+                    sentence_range: ProofDiagnostic {
+                        byte_start: failure.sentence_start,
+                        byte_end: failure.sentence_end,
+                    },
+                    before_state,
+                    before_goals,
+                    trace: failure.trace,
+                }))
+            }
+            _ => {
+                let error = PetError::Protocol(
+                    "PET traced-run success/failure fields are inconsistent".into(),
+                );
+                self.poison_if_invalidated(&error);
+                Err(error)
+            }
+        }
     }
 
     /// Read structured goals without allocating another PET state ID.
@@ -996,7 +1155,7 @@ impl PetProcess {
             return Err(PetError::Invalid("request is oversized".into()));
         }
         let deadline = timeout.map(ResponseDeadline::new).transpose()?;
-        if cancellation::request_cancelled() {
+        if request::request_cancelled() {
             terminate_child(&mut self.child);
             return Err(PetError::Cancelled);
         }
@@ -1453,7 +1612,7 @@ fn wait_for_pet_output(
     reader: &BufReader<ChildStdout>,
     deadline: Option<ResponseDeadline>,
 ) -> Result<(), PetError> {
-    if !cancellation::request_scope_active() && deadline.is_none() {
+    if !request::request_scope_active() && deadline.is_none() {
         return Ok(());
     }
 
@@ -1462,7 +1621,7 @@ fn wait_for_pet_output(
         use std::os::fd::AsRawFd;
 
         loop {
-            if cancellation::request_cancelled() {
+            if request::request_cancelled() {
                 return Err(PetError::Cancelled);
             }
             let wait_ms = if let Some(deadline) = deadline {
@@ -1499,7 +1658,7 @@ fn wait_for_pet_output(
 
     #[cfg(not(unix))]
     {
-        if cancellation::request_cancelled() {
+        if request::request_cancelled() {
             Err(PetError::Cancelled)
         } else if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline.at) {
             Err(deadline.unwrap().error())
@@ -1564,12 +1723,7 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-mod cancellation;
 mod results;
-
-pub use cancellation::{
-    PetRequestCancellation, commit_request, request_cancelled, with_request_cancellation,
-};
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -1732,11 +1886,11 @@ while True:
         let mut process = PetProcess::spawn(directory.path(), &script).unwrap();
         handshake(&mut process).unwrap();
         let process_group = process.child.id() as i32;
-        let cancellation = PetRequestCancellation::new();
+        let cancellation = crate::RequestCancellation::new();
         let worker_cancellation = cancellation.clone();
         let (result_tx, result_rx) = mpsc::sync_channel(0);
         let worker = std::thread::spawn(move || {
-            let error = with_request_cancellation(&worker_cancellation, || {
+            let error = crate::with_request_cancellation(&worker_cancellation, || {
                 process.rpc("test/hang", json!({})).unwrap_err()
             });
             result_tx.send((process, error)).unwrap();
@@ -1916,7 +2070,7 @@ while True:
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
             "refresh_workspace_v1", "structured_assumptions_v1", "typed_errors_v1",
-            "diagnostic_ranges_v1"]
+            "diagnostic_ranges_v1", "traced_run_v1"]
     elif method == "petanque/setWorkspace":
         result = None
     elif method == "petanque/document_declarations":
@@ -1980,7 +2134,8 @@ while True:
             "document_declarations_v2", "dune_workspace_v1",
             "insertion_point_v1", "atomic_run_v1", "release_states_v1",
             "refresh_workspace_v1", "state_count_v1",
-            "structured_assumptions_v1", "typed_errors_v1", "diagnostic_ranges_v1"]}}
+            "structured_assumptions_v1", "typed_errors_v1", "diagnostic_ranges_v1",
+            "traced_run_v1"]}}
     elif method == "petanque/refresh_workspace":
         payload = {{"jsonrpc":"2.0", "id":request["id"],
                    "error":{{"code":-32000, "message":"forced refresh failure"}}}}

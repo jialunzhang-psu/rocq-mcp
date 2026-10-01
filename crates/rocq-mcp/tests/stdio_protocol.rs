@@ -139,6 +139,10 @@ fn official_stdio_transport_serves_initialize_and_tools_list() {
     let initialize: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(initialize["id"], 1);
     assert_eq!(initialize["result"]["serverInfo"]["name"], "rocq-mcp");
+    assert_eq!(
+        initialize["result"]["capabilities"]["experimental"]["codex/sandbox-state-meta"],
+        serde_json::json!({})
+    );
 
     writeln!(
         input,
@@ -151,6 +155,223 @@ fn official_stdio_transport_serves_initialize_and_tools_list() {
     let tools: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(tools["id"], 2);
     assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 10);
+    drop(input);
+    let _ = child.wait();
+}
+
+#[test]
+fn relative_start_uses_codex_calling_cwd_and_never_the_server_cwd() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(
+        project.path().join("A.v"),
+        "Theorem t : True. exact I. Qed.\n",
+    )
+    .unwrap();
+    let unrelated_server_cwd = tempfile::tempdir().unwrap();
+    let project_uri = url::Url::from_directory_path(project.path())
+        .unwrap()
+        .to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
+        .arg("--stdio")
+        .current_dir(unrelated_server_cwd.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-relative-path-test","version":"1"}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let initialize: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        initialize["result"]["capabilities"]["experimental"]["codex/sandbox-state-meta"],
+        serde_json::json!({})
+    );
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":2,
+            "method":"tools/call",
+            "params":{
+                "_meta":{
+                    "codex/sandbox-state-meta":{
+                        "sandboxCwd":project_uri,
+                        "permissionProfile":{}
+                    }
+                },
+                "name":"start",
+                "arguments":{"project_path":"."}
+            }
+        })
+    )
+    .unwrap();
+    input.flush().unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let start: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(start["id"], 2, "{start}");
+    assert_eq!(start["result"]["isError"], false, "{start}");
+
+    let missing_context = call_tool(
+        &mut input,
+        &mut output,
+        3,
+        "start",
+        serde_json::json!({"project_path":"."}),
+    );
+    assert_eq!(missing_context["isError"], true, "{missing_context}");
+    assert_eq!(
+        missing_context["structuredContent"]["kind"], "invalid_configuration",
+        "{missing_context}"
+    );
+    assert!(
+        missing_context["structuredContent"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("neither Codex sandbox metadata nor MCP roots")),
+        "{missing_context}"
+    );
+
+    let files = call_tool(
+        &mut input,
+        &mut output,
+        4,
+        "list_files",
+        serde_json::json!({}),
+    );
+    assert_eq!(files["isError"], false, "{files}");
+    assert_eq!(
+        files["structuredContent"],
+        serde_json::json!({"files":["A.v"]})
+    );
+    drop(input);
+    let _ = child.wait();
+}
+
+#[test]
+fn relative_start_uses_a_single_standard_mcp_root_and_rejects_multiple_roots() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(
+        project.path().join("A.v"),
+        "Theorem t : True. exact I. Qed.\n",
+    )
+    .unwrap();
+    let project_uri = url::Url::from_directory_path(project.path())
+        .unwrap()
+        .to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{}},"clientInfo":{"name":"roots-relative-path-test","version":"1"}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"start","arguments":{"project_path":"."}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let roots_request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(roots_request["method"], "roots/list", "{roots_request}");
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":roots_request["id"],"result":{"roots":[{"uri":project_uri}]}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let start: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(start["id"], 2, "{start}");
+    assert_eq!(start["result"]["isError"], false, "{start}");
+
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"start","arguments":{"project_path":"."}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let roots_request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(roots_request["method"], "roots/list", "{roots_request}");
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":roots_request["id"],
+            "result":{"roots":[
+                {"uri":project_uri},
+                {"uri":"file:///tmp/another-workspace"}
+            ]}
+        })
+    )
+    .unwrap();
+    input.flush().unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let ambiguous: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ambiguous["id"], 3, "{ambiguous}");
+    assert_eq!(ambiguous["result"]["isError"], true, "{ambiguous}");
+    assert_eq!(
+        ambiguous["result"]["structuredContent"]["kind"], "ambiguous",
+        "{ambiguous}"
+    );
     drop(input);
     let _ = child.wait();
 }
@@ -589,6 +810,27 @@ fn runaway_tactics_honor_fragment_deadlines_and_mcp_cancellation() {
         }),
     );
     std::thread::sleep(std::time::Duration::from_millis(100));
+    // Progress is a normal query, not a server notification, and must bypass
+    // the admission/project locks held by the in-flight PET request.
+    send(
+        &mut input,
+        serde_json::json!({
+            "jsonrpc":"2.0", "id":70, "method":"tools/call",
+            "params":{"name":"query","arguments":{"kind":"progress"}}
+        }),
+    );
+    let progress = receive(70, std::time::Duration::from_secs(2));
+    assert_eq!(progress["result"]["isError"], false, "{progress}");
+    assert_eq!(
+        progress["result"]["structuredContent"]["status"], "running",
+        "{progress}"
+    );
+    assert!(
+        progress["result"]["structuredContent"]["generation"]
+            .as_u64()
+            .is_some(),
+        "{progress}"
+    );
     send(
         &mut input,
         serde_json::json!({
@@ -599,6 +841,18 @@ fn runaway_tactics_honor_fragment_deadlines_and_mcp_cancellation() {
     // MCP declares a cancelled request's result unused, and rmcp may suppress
     // its late response entirely. Observe the required side effect directly.
     wait_for_pid_exit(pet_before_cancel);
+
+    let terminal_progress = call(
+        &mut input,
+        71,
+        "query",
+        serde_json::json!({"kind":"progress"}),
+    );
+    assert_eq!(terminal_progress["isError"], false, "{terminal_progress}");
+    assert_eq!(
+        terminal_progress["structuredContent"]["status"], "cancelled",
+        "{terminal_progress}"
+    );
 
     let recovered = call(&mut input, 8, "query", serde_json::json!({"kind":"goals"}));
     assert_eq!(recovered["isError"], false, "{recovered}");
@@ -1711,4 +1965,170 @@ fn proof_observability_preserves_pet_focus_ranges_and_bounded_goal_pages() {
         fs::read_to_string(project.path().join("A.v")).unwrap(),
         source
     );
+}
+
+#[test]
+fn symbol_location_declaration_diagnostics_and_structured_traces_are_queryable() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("dune-project"),
+        "(lang dune 3.22)\n(using rocq 0.12)\n",
+    )
+    .unwrap();
+    fs::write(project.path().join("dune"), "(rocq.theory (name Demo))\n").unwrap();
+    fs::write(
+        project.path().join("A.v"),
+        "Theorem known : True. Admitted.\n",
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("Main.v"),
+        "Theorem conj : True /\\ True. Admitted.\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rocq-mcp"))
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0", "id":1, "method":"initialize",
+            "params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"observability","version":"1"}}
+        })
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+
+    assert_eq!(
+        call_tool(
+            &mut input,
+            &mut output,
+            2,
+            "start",
+            serde_json::json!({"project_path":project.path()}),
+        )["isError"],
+        false
+    );
+    let exact = call_tool(
+        &mut input,
+        &mut output,
+        3,
+        "query",
+        serde_json::json!({"kind":"locate_symbol","symbol":"Demo.A.known"}),
+    );
+    assert_eq!(exact["isError"], false, "{exact}");
+    assert_eq!(
+        exact["structuredContent"]["candidates"][0]["match"],
+        "exact"
+    );
+    assert_eq!(
+        exact["structuredContent"]["candidates"][0]["require_import"],
+        "Require Import Demo.A."
+    );
+    let leaf = call_tool(
+        &mut input,
+        &mut output,
+        4,
+        "query",
+        serde_json::json!({"kind":"locate_symbol","symbol":"known"}),
+    );
+    assert_eq!(leaf["structuredContent"]["candidates"][0]["match"], "leaf");
+    let suffix = call_tool(
+        &mut input,
+        &mut output,
+        5,
+        "query",
+        serde_json::json!({"kind":"locate_symbol","symbol":"A.known"}),
+    );
+    assert_eq!(
+        suffix["structuredContent"]["candidates"][0]["match"],
+        "suffix"
+    );
+
+    let missing = call_tool(
+        &mut input,
+        &mut output,
+        6,
+        "declare",
+        serde_json::json!({"name":"uses_known","statement":"known","file":"Main.v"}),
+    );
+    assert_eq!(missing["isError"], true, "{missing}");
+    assert_eq!(
+        missing["structuredContent"]["resolution"]["kind"],
+        "missing_identifier"
+    );
+    assert_eq!(
+        missing["structuredContent"]["resolution"]["suggested_imports"][0],
+        "Require Import Demo.A."
+    );
+    assert_eq!(
+        missing["structuredContent"]["diagnostic"]["byte_range"],
+        serde_json::json!({"start":0,"end":5})
+    );
+
+    let target = serde_json::json!({"file":"Main.v","qualified_path":["Demo","Main","conj"]});
+    let opened = call_tool(
+        &mut input,
+        &mut output,
+        7,
+        "prove",
+        serde_json::json!({"target":target}),
+    );
+    assert_eq!(opened["isError"], false, "{opened}");
+    let split = call_tool(
+        &mut input,
+        &mut output,
+        8,
+        "check",
+        serde_json::json!({"attempts":["split."],"structured":true}),
+    );
+    assert_eq!(split["isError"], false, "{split}");
+    assert!(split["structuredContent"]["state"]["structured_goals"].is_object());
+    assert!(split["structuredContent"]["goal_diff"].is_object());
+    let structured = call_tool(
+        &mut input,
+        &mut output,
+        9,
+        "query",
+        serde_json::json!({"kind":"goals","structured":true,"diff":true}),
+    );
+    assert_eq!(structured["isError"], false, "{structured}");
+    assert!(structured["structuredContent"]["structured_goals"].is_object());
+    assert!(structured["structuredContent"]["goal_diff"].is_object());
+    let traced = call_tool(
+        &mut input,
+        &mut output,
+        10,
+        "try",
+        serde_json::json!({
+            "attempts":["idtac. nonsense."],
+            "trace":true,
+            "structured":true
+        }),
+    );
+    assert_eq!(traced["isError"], false, "{traced}");
+    let error = &traced["structuredContent"]["attempts"][0]["error"];
+    assert_eq!(error["sentence_index"], 1);
+    assert_eq!(error["sentence_number"], 2);
+    assert_eq!(error["trace"].as_array().unwrap().len(), 2);
+    assert!(error["before_state"]["structured_goals"].is_object());
+
+    drop(input);
+    assert!(child.wait().unwrap().success());
 }

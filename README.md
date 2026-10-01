@@ -13,7 +13,8 @@ An MCP server for interactive Rocq proofs. The workspace has three crates:
 Requires Rust, Rocq, opam, and Dune. The tested versions are Rust 1.97, Rocq
 9.1.1, the pinned PET 0.2.5 fork in `third_party/coq-lsp`, and Dune 3.22.
 The pinned PET adds canonical document declarations, exact state release,
-nested-module insertion anchors, and authoritative workspace refresh. An
+nested-module insertion anchors, parser-aware traced speculative runs, and
+authoritative workspace refresh. An
 unmodified PET 0.2.5 does not implement those lifecycle endpoints.
 
 ```sh
@@ -39,9 +40,17 @@ to `target/pet` by default (override with `ROCQ_PET_PREFIX`) and emits a
 launcher that binds PET to the matching coq-lsp plugin tree. It never depends
 on Dune's private `_build` path. Dune commands have no default correctness
 deadline; operators may set `ROCQ_COMMAND_TIMEOUT_SECS` explicitly.
+Read-only `query` calls have a 240-second watchdog so an abandoned project
+refresh or prover query cannot outlive its client indefinitely; override it
+with a positive `ROCQ_QUERY_TIMEOUT_SECS` value.
 
 The ten tools and their JSON results are specified in
 [`COMMANDS.md`](crates/rocq-mcp/COMMANDS.md).
+Multi-sentence `check`/`try` failures can opt into parser-derived sentence
+traces and pre-failure goal snapshots; project symbol lookup, structured
+goals/diffs, and publication/PET replay status are exposed through documented
+`query` variants. Progress is strictly client-polled with
+`query(kind:"progress")`; the server does not emit progress notifications.
 
 ## Test
 

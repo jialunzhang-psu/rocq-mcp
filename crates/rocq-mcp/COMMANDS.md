@@ -18,6 +18,12 @@ successfully builds the source, and PET's structured global-context report
 passes the wrapper's trust policy. The wrapper never infers completion from
 source text or parses human-readable Rocq output to classify dependencies.
 
+Structured goal contexts, sentence traces, and publication/replay progress are
+opt-in observations. They are returned only when the corresponding request
+flag is set (or when `query(kind:"progress")` is polled), so clients that use
+the historical rendered fields remain wire-compatible. Progress is never sent
+as an MCP notification.
+
 Errors are JSON objects of the form
 `{"kind":"invalid_request","message":"call start first"}`. The `message` gives
 the specific field, declaration, or Rocq diagnostic. Every tool after `start`
@@ -65,7 +71,7 @@ kind is `request_cancelled`; normally the cancelling client discards it.
 ## `start`
 
 ```json
-{"tool":"start","args":{"project_path":"./project"}}
+{"tool":"start","args":{"project_path":"/absolute/path/to/project"}}
 ```
 
 Returns `{}`. It only attaches the Dune workspace and does not
@@ -78,11 +84,20 @@ If PET was already lost while retiring this connection's proof, its old IDs no
 longer exist: retirement succeeds, sibling sessions discard their stale IDs,
 and the attachment is installed normally.
 
+Pass an absolute path to a directory on the MCP server, especially through
+HTTP/Funnel or another remote client. A relative `project_path` is accepted
+only when the client explicitly supplies a per-request working directory
+(including Codex's negotiated `codex/sandbox-state-meta`) or exactly one local
+`file:` URI through MCP `roots/list`. Most remote clients supply neither. The
+server never guesses from the caller's shell and never interprets the path
+relative to the MCP process's own working directory; use an absolute path when
+the client context is unknown.
+
 | Error kind | When |
 |---|---|
 | `invalid_request` | Missing, empty, mistyped, or extra argument. |
-| `invalid_configuration` | Unavailable path, invalid layout, or unusable project environment. |
-| `ambiguous` | More than one project layout applies. |
+| `invalid_configuration` | Unavailable path, missing/non-local client base for a relative path, invalid layout, or unusable project environment. |
+| `ambiguous` | More than one client root or project layout applies. |
 | `project_timeout` | Dune project discovery or description timed out. |
 | `pet_failure` | PET reported an anomaly, system failure, or unknown remote error while retiring a proof. |
 
@@ -130,6 +145,19 @@ goal across all collections; `scope` and `goal_id` are mutually exclusive.
 require `expression`. `search` requires a Rocq Search pattern. `search`,
 `type`, and `notations` accept an optional `at` `DeclarationId` selecting an
 explicit original PET source context.
+`locate_symbol` requires a non-empty `symbol`. It uses current compiler `.glob`
+files (or a conservative source-presence fallback for a missing/stale index)
+to select candidate documents, then asks PET for canonical declaration
+metadata only in those documents. `limit` (1–100, default 20) bounds the
+result. It returns the complete declaration id, qualified name, declaration
+kind/statement, Dune-derived module, a suggested `Require Import`, and the
+match class (`exact`, `suffix`, or `leaf`). `progress` is a lock-free polling
+query; it accepts only an optional previously observed `generation` and never
+waits for or pushes a state transition.
+For `goals`, `structured:true` adds local hypotheses, goal types, stack-frame
+sides, the bullet suggestion, and epoch-scoped ids where the selected state is
+retained. `diff:true` adds a semantic before/after goal diff when a parent
+checkpoint is available. Both flags are additive and omitted by default.
 Every text-returning variant accepts an optional non-negative `offset` for
 resuming a bounded result, including `goals`.
 Do not mix fields from different variants.
@@ -144,6 +172,9 @@ Do not mix fields from different variants.
 {"tool":"query","args":{"kind":"type","expression":"Nat.add 1 2","at":{"file":"Main.v","qualified_path":["Demo","t"]}}}
 {"tool":"query","args":{"kind":"notations","expression":"x + y","at":{"file":"Main.v","qualified_path":["Demo","t"]}}}
 {"tool":"query","args":{"kind":"print","target":{"file":"Main.v","qualified_path":["Demo","t"]},"offset":32768}}
+{"tool":"query","args":{"kind":"locate_symbol","symbol":"map","limit":10}}
+{"tool":"query","args":{"kind":"progress","generation":7}}
+{"tool":"query","args":{"kind":"goals","structured":true,"diff":true}}
 ```
 
 `search`, `about`, and `print` execute Rocq `Search`, `About`, and `Print`
@@ -194,6 +225,32 @@ goals, the server revalidates the declaration's source digest and Dune source
 selection; a changed or malformed environment is reported instead of exposing
 stale PET state.
 
+Before PET consumes a target document, MCP asks Dune to build that exact
+consumer `.vo`. If the source, `.vo`, or `.glob` fingerprint changes (including
+a rebuild caused only by a transitive dependency), the server changes the PET
+epoch and leaves every retained checkpoint replayable. This is automatic; do
+not run `dune clean` or replace PET manually after an inconsistent-assumptions
+diagnostic.
+
+With `structured:true`, an open state additionally contains
+`structured_goals:{focused,stack,unfocused,shelved,given_up,next_bullet}`. Each
+goal has `hypotheses` (names, optional definition, and type), `type`, and
+an optional `id`; stack frames retain distinct `left` and `right` sides. Goal
+ids are explicitly scoped to the current PET epoch and are omitted from
+hypothetical `try` states. With `diff:true`, `goal_diff` reports semantic
+context/type matches, additions, removals, counts, and whether duplicate goals
+made matching ambiguous; PET evar numbers are never used as durable identity.
+
+`kind:"progress"` returns the most recent operation for this MCP connection:
+`generation`, `status` (`idle`, `running`, `completed`, `failed`, or
+`cancelled`), `phase`, `completed`, optional `total`, `elapsed_ms`, target, and
+a bounded `log_summary`. A completed/failed record is retained until the next
+operation, so polling cannot miss a fast build. Supplying the last generation
+sets `changed:false` when no newer record exists and `changed:true` otherwise.
+The query is intentionally independent of the connection admission, project,
+selection, and PET locks, so it can be issued while a build or PET replay is
+running. No progress notification is emitted.
+
 | Error kind | When |
 |---|---|
 | `invalid_request` | Missing project, unknown kind, invalid field, target, expression, or paging offset. |
@@ -202,6 +259,7 @@ stale PET state.
 | `declaration_changed` | Selected proof no longer matches its declaration. |
 | `pet_lost` | The project PET child or its protocol transport was lost. |
 | `query_failed` | Rocq rejected the query or its expression after request validation. |
+| `query_timeout` | The query exceeded the 240-second watchdog (or `ROCQ_QUERY_TIMEOUT_SECS`). |
 | `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 | `project_timeout` | Dune project discovery or description timed out. |
 | `invalid_configuration` | Project or query environment/capability surface is unusable. |
@@ -223,6 +281,14 @@ Dune prefix is rejected rather than silently normalized. The target source file 
 selected by Dune; the wrapper does not create files or edit `(modules ...)`.
 Source insertion occurs only when the proof closes. If a proof is already
 active, `declare` rejects without changing it; call `abandon` explicitly.
+If the statement references an identifier that is not in the declaration
+environment, the semantic error keeps PET's message and adds
+`resolution:{kind:"missing_identifier",identifier,candidates,suggested_imports}`.
+Its diagnostic byte range is translated from the synthetic header to the exact
+statement-relative range, and each candidate includes its full id and a
+Dune-derived `Require Import` suggestion. An empty candidate list means the
+symbol is not present in the selected project, not that source text was
+searched unsuccessfully.
 
 | Error kind | When |
 |---|---|
@@ -288,6 +354,7 @@ invalidates stale IDs held by sibling sessions.
 ```json
 {"tool":"check","args":{"attempts":["intro n. reflexivity.","intros; auto."]}}
 {"tool":"check","args":{"attempts":["eauto.","firstorder."],"timeout_ms":5000}}
+{"tool":"check","args":{"attempts":["intros; auto."],"trace":true,"structured":true}}
 ```
 
 Accepts 1–20 ordered proof fragments; each fragment may contain one or more
@@ -296,6 +363,15 @@ fragment whose every sentence PET accepts is committed, and later fragments
 are not evaluated. A rejected multi-sentence fragment is atomic: none of its
 accepted prefix is appended. If Rocq identifies the failing command, that
 entry's error contains its PET-provided fragment-relative byte range.
+
+With `trace:true`, a rejected fragment additionally reports a bounded parser
+trace (`trace` entries contain sentence index, byte range, and command), the
+zero-based `sentence_index`/one-based `sentence_number` of the failing command,
+and a read-only `before_state` captured immediately before it. Rocq's parser,
+not a period-splitting heuristic, determines sentence boundaries. With
+`structured:true`, that `before_state` and the selected state include
+`structured_goals`; the response also includes a semantic `goal_diff` against
+the state from which the alternative started. Both options default to false.
 
 `selected` is the zero-based winning input index. `rejected` contains the
 ordered errors before it and is omitted when empty. Results have these sparse
@@ -333,6 +409,10 @@ build deadline. An operator may set the single explicit Dune-command limit
 with `ROCQ_COMMAND_TIMEOUT_SECS`. `pet_lost` means unexpected loss of the PET
 child/protocol transport, after which
 checkpoint states are invalidated and lazily replayed.
+While `check` is running, poll `query(kind:"progress")` on the same MCP
+connection. Publication phases expose writeback, Dune build, PET refresh,
+trust audit, and rollback summaries; the final generation remains available
+after completion. The server does not push progress notifications.
 
 | Top-level error kind | When |
 |---|---|
@@ -349,6 +429,7 @@ checkpoint states are invalidated and lazily replayed.
 ```json
 {"tool":"try","args":{"attempts":["intro n. reflexivity.","auto."]}}
 {"tool":"try","args":{"attempts":["eauto.","firstorder."],"timeout_ms":5000}}
+{"tool":"try","args":{"attempts":["idtac. nonsense."],"trace":true,"structured":true}}
 ```
 
 Accepts the same 1–20 multi-sentence proof fragments as `check` and evaluates
@@ -367,6 +448,11 @@ fragment would close the proof if committed.
 `timeout_ms` has the same per-fragment semantics as `check`. A timed-out entry
 is returned with `solved:false` and a `proof_step_timeout` error; later entries
 still run independently after the original checkpoint is replayed.
+`trace` and `structured` have the same meanings as in `check`: a rejected
+multi-sentence alternative identifies its failing sentence and immutable
+pre-failure goals without exposing a partial PET state. Poll
+`query(kind:"progress")` for per-alternative execution and PET replay timing;
+no notifications are sent.
 
 | Top-level error kind | When |
 |---|---|
@@ -397,6 +483,10 @@ solved fragment closes the active proof. An all-rejected `check` and every
 The operation validates the source digest and current Dune source selection,
 replays the selected checkpoint path in PET when its cached state is not available, and
 changes the selected checkpoint only after validation/replay succeeds.
+If replay is needed, poll `query(kind:"progress")` to observe the
+`pet_replay` phase, completed/total checkpoint count, target, elapsed time, and
+the latest checkpoint summary. The poll remains available while replay owns
+the project and selection locks.
 
 Returns the proof state directly:
 

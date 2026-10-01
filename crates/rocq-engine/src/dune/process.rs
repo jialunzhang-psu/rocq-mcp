@@ -27,6 +27,8 @@ pub(crate) struct NativeOutput {
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
     pub(crate) timed_out: bool,
+    /// The admitted MCP request was cancelled before this command completed.
+    pub(crate) cancelled: bool,
     pub(crate) overflow: bool,
 }
 
@@ -79,6 +81,7 @@ pub(crate) fn run_dune(
             Ok(output)
                 if !retried
                     && !output.timed_out
+                    && !output.cancelled
                     && output.status.signal().is_some()
                     && deadline.is_none_or(|limit| Instant::now() < limit) =>
             {
@@ -183,7 +186,7 @@ fn run_dune_once(
     let stdout = thread::spawn(move || bounded_read(stdout, DUNE_OUTPUT_LIMIT));
     let stderr = thread::spawn(move || bounded_read(stderr, DUNE_OUTPUT_LIMIT));
     let waited = wait_for_dune(&mut child, pid, deadline);
-    let (status, timed_out) = match waited {
+    let (status, timed_out, cancelled) = match waited {
         Ok(result) => result,
         Err(error) => {
             terminate_child_group(&mut child, pid);
@@ -208,6 +211,7 @@ fn run_dune_once(
         stdout,
         stderr,
         timed_out,
+        cancelled,
         overflow: stdout_overflow || stderr_overflow,
     })
 }
@@ -216,19 +220,24 @@ fn wait_for_dune(
     child: &mut std::process::Child,
     pid: Pid,
     deadline: Option<Instant>,
-) -> std::io::Result<(ExitStatus, bool)> {
-    let Some(deadline) = deadline else {
+) -> std::io::Result<(ExitStatus, bool, bool)> {
+    if deadline.is_none() && !crate::request::request_scope_active() {
         // Design note: waiting directly avoids a polling loop for terminating
-        // compiler/build commands when the caller chose no deadline.
-        return child.wait().map(|status| (status, false));
-    };
+        // compiler/build commands when neither a deadline nor MCP
+        // cancellation can interrupt the operation.
+        return child.wait().map(|status| (status, false, false));
+    }
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok((status, false));
+            return Ok((status, false, false));
         }
-        if Instant::now() >= deadline {
+        if crate::request::request_cancelled() {
             let _ = killpg(pid, Signal::SIGKILL);
-            return child.wait().map(|status| (status, true));
+            return child.wait().map(|status| (status, false, true));
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let _ = killpg(pid, Signal::SIGKILL);
+            return child.wait().map(|status| (status, true, false));
         }
         thread::sleep(Duration::from_millis(10));
     }

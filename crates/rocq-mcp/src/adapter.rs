@@ -7,7 +7,7 @@ use crate::{
 };
 use rocq_engine::{
     DeclarationIdentity, DeclarationInfo, DeclarationKind, Engine, Error, ErrorKind, FileId,
-    GoalScope, OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, pet, validate_fragments,
+    GoalScope, OpenResult, OpenedProof, PetQuery, PetStateId, ProofState, validate_fragments,
 };
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -29,6 +29,7 @@ pub(crate) fn public_error(error: &Error) -> Value {
         ErrorKind::RequestCancelled => "request_cancelled",
         ErrorKind::PetLost => "pet_lost",
         ErrorKind::QueryFailed => "query_failed",
+        ErrorKind::QueryTimeout => "query_timeout",
         ErrorKind::PetFailure => "pet_failure",
         ErrorKind::ProjectTimeout => "project_timeout",
         ErrorKind::BuildTimeout => "build_timeout",
@@ -43,6 +44,20 @@ pub(crate) fn public_error(error: &Error) -> Value {
                 "end": diagnostic.byte_end,
             }
         });
+    }
+    if let Some(resolution) = &error.resolution {
+        // Keep remediation metadata bounded even when a future PET backend
+        // returns a very large candidate set.  The semantic message/range
+        // remain lossless; only optional advice is truncated.
+        let encoded = serde_json::to_vec(resolution).unwrap_or_default();
+        if encoded.len() <= 16 * 1024 {
+            value["resolution"] = resolution.clone();
+        } else {
+            value["resolution"] = json!({
+                "kind": "truncated",
+                "message": "resolution metadata exceeded the transport bound"
+            });
+        }
     }
     value
 }
@@ -105,6 +120,7 @@ fn public_message(error: &Error) -> String {
         ErrorKind::QueryFailed => {
             Some("retry with a valid query kind and target in the current Rocq context")
         }
+        ErrorKind::QueryTimeout => Some("retry the query or increase ROCQ_QUERY_TIMEOUT_SECS"),
     };
     match action {
         Some(action) => {
@@ -124,6 +140,19 @@ fn state_json(
     state: &ProofState,
     checkpoint: Option<CheckpointId>,
     retained_next_offset: Option<usize>,
+) -> Value {
+    state_json_with_options(state, checkpoint, retained_next_offset, false)
+}
+
+/// Render a proof state for the wire.  Structured contexts are deliberately
+/// opt-in: the historical rendered response stays byte/field compatible for
+/// clients that do not need the potentially large hypothesis payload.  The
+/// engine still materializes the semantic view internally for goal diffs.
+fn state_json_with_options(
+    state: &ProofState,
+    checkpoint: Option<CheckpointId>,
+    retained_next_offset: Option<usize>,
+    include_structured: bool,
 ) -> Value {
     let mut value = json!({
         "target": declaration_identity_json(&state.theorem.identity),
@@ -167,11 +196,144 @@ fn state_json(
             "total": state.goal_focus.total_count(),
         });
         value["focus"] = focus_json(state, checkpoint.is_some());
+        if include_structured && let Some(structured) = &state.structured_goals {
+            value["structured_goals"] = structured_goals_json(structured, checkpoint.is_some());
+        }
     }
     if let Some(checkpoint) = checkpoint {
         value["checkpoint"] = json!(checkpoint.get());
     }
     value
+}
+
+fn structured_goals_json(goals: &rocq_engine::StructuredGoals, include_epoch_ids: bool) -> Value {
+    fn one(goal: &rocq_engine::GoalDetail, include_epoch_ids: bool) -> Value {
+        let hypotheses = goal
+            .hypotheses
+            .iter()
+            .map(|hypothesis| {
+                json!({
+                    "names": hypothesis.names,
+                    "definition": hypothesis.definition,
+                    "type": hypothesis.ty,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut value = json!({
+            "name": goal.name,
+            "hypotheses": hypotheses,
+            "type": goal.ty,
+        });
+        // PET evars are epoch-scoped.  Expose them only for a retained
+        // checkpoint, never for a released speculative `try` state.
+        if include_epoch_ids {
+            value["id"] = Value::Array(goal.evar.clone());
+        }
+        value
+    }
+    let stack = goals
+        .stack
+        .iter()
+        .map(|frame| {
+            json!({
+                "left": frame
+                    .left
+                    .iter()
+                    .map(|goal| one(goal, include_epoch_ids))
+                    .collect::<Vec<_>>(),
+                "right": frame
+                    .right
+                    .iter()
+                    .map(|goal| one(goal, include_epoch_ids))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "focused": goals.focused.iter().map(|goal| one(goal, include_epoch_ids)).collect::<Vec<_>>(),
+        "stack": stack,
+        "unfocused": goals.unfocused.iter().map(|goal| one(goal, include_epoch_ids)).collect::<Vec<_>>(),
+        "shelved": goals.shelved.iter().map(|goal| one(goal, include_epoch_ids)).collect::<Vec<_>>(),
+        "given_up": goals.given_up.iter().map(|goal| one(goal, include_epoch_ids)).collect::<Vec<_>>(),
+        "next_bullet": goals.next_bullet,
+        "identity_scope": "pet_epoch",
+    })
+}
+
+fn semantic_goal_json(goal: &rocq_engine::GoalDetail, scope: &str) -> Value {
+    json!({
+        "scope": scope,
+        "name": goal.name,
+        "hypotheses": goal.hypotheses.iter().map(|hypothesis| json!({
+            "names": hypothesis.names,
+            "definition": hypothesis.definition,
+            "type": hypothesis.ty,
+        })).collect::<Vec<_>>(),
+        "type": goal.ty,
+    })
+}
+
+/// Compare goal contexts semantically without treating PET evar numbers as
+/// durable identities.  Duplicate identical goals are matched as a multiset
+/// and reported as ambiguous so clients know the diff is observational rather
+/// than a kernel-level ancestry proof.
+fn goal_diff_json(before: &ProofState, after: &ProofState) -> Option<Value> {
+    let before = before.structured_goals.as_ref()?;
+    let after = after.structured_goals.as_ref()?;
+    fn flatten(goals: &rocq_engine::StructuredGoals) -> Vec<(String, Value)> {
+        let mut output = Vec::new();
+        for (scope, values) in [
+            ("focused", &goals.focused),
+            ("unfocused", &goals.unfocused),
+            ("shelved", &goals.shelved),
+            ("given_up", &goals.given_up),
+        ] {
+            for goal in values {
+                let value = semantic_goal_json(goal, scope);
+                let key = serde_json::to_string(&value).unwrap_or_default();
+                output.push((key, value));
+            }
+        }
+        output
+    }
+    let before = flatten(before);
+    let after = flatten(after);
+    let mut used_after = vec![false; after.len()];
+    let mut removed = Vec::new();
+    let mut unchanged = 0usize;
+    let mut ambiguous = false;
+    for (key, value) in &before {
+        let matches = after
+            .iter()
+            .enumerate()
+            .filter(|(index, (candidate, _))| !used_after[*index] && candidate == key)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            ambiguous = true;
+        }
+        if let Some(index) = matches.first().copied() {
+            used_after[index] = true;
+            unchanged += 1;
+        } else {
+            removed.push(value.clone());
+        }
+    }
+    let added = after
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, value))| (!used_after[index]).then_some(value.clone()))
+        .collect::<Vec<_>>();
+    Some(json!({
+        "matching": "semantic_context_and_type",
+        "epoch_ids_used": false,
+        "ambiguous": ambiguous,
+        "before_count": before.len(),
+        "after_count": after.len(),
+        "unchanged_count": unchanged,
+        "added": added,
+        "removed": removed,
+    }))
 }
 
 fn focus_json(state: &ProofState, include_goal_ids: bool) -> Value {
@@ -224,6 +386,21 @@ fn declaration_json(declaration: &DeclarationInfo) -> Value {
         "id": declaration_identity_json(&declaration.identity),
         "statement": declaration.statement,
         "kind": format!("{:?}", declaration.kind),
+    })
+}
+
+fn symbol_location_json(location: &rocq_engine::SymbolLocation) -> Value {
+    json!({
+        "id": declaration_identity_json(&location.identity),
+        "qualified_name": location.qualified_name,
+        "kind": format!("{:?}", location.kind),
+        "statement": location.statement,
+        "module": location.require_import
+            .strip_prefix("Require Import ")
+            .and_then(|value| value.strip_suffix('.'))
+            .unwrap_or_default(),
+        "require_import": location.require_import,
+        "match": location.match_kind,
     })
 }
 
@@ -317,8 +494,49 @@ fn attempt_timeout(args: &Value) -> Result<Option<Duration>, Error> {
         .transpose()
 }
 
+fn optional_bool(args: &Value, field: &str) -> Result<bool, Error> {
+    match args.get(field) {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(Error::new(
+            ErrorKind::InvalidRequest,
+            format!("{field} must be a boolean"),
+        )),
+    }
+}
+
+fn traced_failure_json(failure: &rocq_engine::ProofFailure, include_structured: bool) -> Value {
+    let mut error = public_error(&failure.error);
+    error["sentence_index"] = json!(failure.sentence_index);
+    error["sentence_number"] = json!(failure.sentence_index + 1);
+    error["sentence_byte_range"] = json!({
+        "start": failure.sentence_range.byte_start,
+        "end": failure.sentence_range.byte_end,
+    });
+    error["before_state"] =
+        state_json_with_options(&failure.before, None, None, include_structured);
+    if !failure.trace.is_empty() {
+        error["trace"] = json!(
+            failure
+                .trace
+                .iter()
+                .map(|step| json!({
+                    "sentence_index": step.sentence_index,
+                    "sentence_number": step.sentence_index + 1,
+                    "byte_range": {
+                        "start": step.byte_range.byte_start,
+                        "end": step.byte_range.byte_end,
+                    },
+                    "command": step.command,
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+    error
+}
+
 fn reject_cancelled() -> Result<(), Error> {
-    if pet::request_cancelled() {
+    if rocq_engine::request_cancelled() {
         Err(Error::new(ErrorKind::RequestCancelled, "request cancelled"))
     } else {
         Ok(())
@@ -329,11 +547,101 @@ fn reject_cancelled() -> Result<(), Error> {
 /// wrapper-owned mutation. Cancellation that won first aborts the operation;
 /// cancellation arriving later cannot interrupt the committed transaction.
 fn commit_or_cancelled() -> Result<(), Error> {
-    if pet::commit_request() {
+    if rocq_engine::commit_request() {
         Ok(())
     } else {
         Err(Error::new(ErrorKind::RequestCancelled, "request cancelled"))
     }
+}
+
+/// Coordinate one Dune consumer build with the process-wide PET epoch.
+fn reconcile_artifact(
+    runtime: &Arc<ServerRuntime>,
+    session: &SessionCell,
+    project: &ProjectRuntime,
+    selection: &mut Selection,
+    file: &FileId,
+) -> Result<(), Error> {
+    reconcile_artifacts(
+        runtime,
+        session,
+        project,
+        selection,
+        std::slice::from_ref(file),
+    )
+}
+
+/// Build a set of consumers, then perform at most one PET epoch transition.
+///
+/// The engine only builds and fingerprints; this adapter owns the lifecycle
+/// consequence. The project operation and current selection locks are held by
+/// every caller, so restarting PET and invalidating sibling sessions is atomic
+/// with respect to queued work. Building all symbol candidates before the
+/// transition avoids repeatedly restarting PET for one locate request.
+fn reconcile_artifacts(
+    runtime: &Arc<ServerRuntime>,
+    session: &SessionCell,
+    project: &ProjectRuntime,
+    selection: &mut Selection,
+    files: &[FileId],
+) -> Result<(), Error> {
+    let mut unique = Vec::<&FileId>::new();
+    for file in files {
+        if !unique.contains(&file) {
+            unique.push(file);
+        }
+    }
+    let total = unique.len() as u64;
+    let mut epoch_boundary = false;
+    for (index, file) in unique.into_iter().enumerate() {
+        reject_cancelled()?;
+        let before = runtime
+            .engine
+            .artifact_fingerprint(project.project(), file)?;
+        let cached = project.artifact(file);
+        // Always ask Dune for the consumer target. Its source and `.vo`
+        // fingerprint cannot reveal that a transitive dependency source is
+        // newer; only Dune owns that graph. A clean build is cheap, while
+        // skipping it recreates the inconsistent-assumptions bug exactly.
+        session.update_current_progress(
+            "dune_build",
+            index as u64,
+            Some(total),
+            format!("building consumer target for {}", file.0),
+        );
+        let built = match runtime.engine.reconcile_source(project.project(), file) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                // A failed build can still have replaced an intermediate
+                // `.vo`. Do not let an old PET state survive an unclassified
+                // build side effect; the next request establishes a fresh
+                // fingerprint.
+                project.forget_artifact(file);
+                project.actor().restart();
+                runtime.invalidate_project_states(project, session, selection);
+                return Err(error);
+            }
+        };
+        // A first build of a previously absent target cannot invalidate a live
+        // proof: no successfully compiled consumer could have loaded that
+        // absent artifact. Once an output or cached snapshot exists, any
+        // changed fingerprint is a real project epoch boundary.
+        let had_artifact = before.vo.is_some() || before.glob.is_some();
+        epoch_boundary |= cached.as_ref().is_some_and(|previous| previous != &built)
+            || (cached.is_none() && had_artifact && before != built);
+        project.record_artifact(file.clone(), built);
+        session.update_current_progress(
+            "dune_build",
+            index as u64 + 1,
+            Some(total),
+            "consumer target is current",
+        );
+    }
+    if epoch_boundary {
+        project.actor().restart();
+        runtime.invalidate_project_states(project, session, selection);
+    }
+    Ok(())
 }
 
 fn invalidates_pet_epoch(kind: ErrorKind) -> bool {
@@ -353,6 +661,27 @@ pub(crate) fn dispatch(
     args: Value,
 ) -> Result<Value, Error> {
     reject_cancelled()?;
+    if name == "query" && args.get("kind").and_then(Value::as_str) == Some("progress") {
+        reject_unknown(&args, &["kind", "generation"])?;
+        let generation = args
+            .get("generation")
+            .map(|value| {
+                value.as_u64().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidRequest,
+                        "generation must be a non-negative integer",
+                    )
+                })
+            })
+            .transpose()?;
+        return Ok(session.progress_json(generation));
+    }
+    // Every admitted operation checks a cheap filesystem-only layout probe.
+    // `refresh_project` invokes Dune only when a Dune file or selected source
+    // set changed, avoiding the 300-second `describe rules` stall on ordinary
+    // symbol/query calls while preserving fail-closed layout changes.
+    let needs_layout_refresh = true;
+    session.update_current_progress("project_refresh", 0, None, "checking Dune project view");
     if name == "start" {
         return start(runtime, session, &args);
     }
@@ -361,7 +690,11 @@ pub(crate) fn dispatch(
         .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "call start first"))?;
     let _operation = project.lock();
     reject_cancelled()?;
-    let layout_changed = runtime.engine.refresh_project(project.project())?;
+    let layout_changed = if needs_layout_refresh {
+        runtime.engine.refresh_project(project.project())?
+    } else {
+        false
+    };
     let mut selection = session
         .selection
         .lock()
@@ -380,6 +713,7 @@ pub(crate) fn dispatch(
         // Dune changed the environment that gives PET states their meaning.
         // Drop the child before any old state handle can be consumed; exact
         // proof text/checkpoint topology remains available for lazy replay.
+        project.clear_artifacts();
         project.actor().restart();
         runtime.invalidate_project_states(&project, session, &mut selection);
     }
@@ -472,6 +806,7 @@ fn install_start_view(
     let layout_changed = runtime.engine.refresh_project(project.project())?;
     selection.project = Some(Arc::clone(project));
     if layout_changed {
+        project.clear_artifacts();
         project.actor().restart();
         runtime.invalidate_project_states(project, session, selection);
     }
@@ -500,6 +835,7 @@ fn dispatch_attached(
         "list_decls" => {
             reject_unknown(args, &["file"])?;
             let file = FileId(required_string(args, "file")?.replace('\\', "/"));
+            reconcile_artifact(runtime, session, project, selection, &file)?;
             let declarations = engine.list_decls(project.project(), project.actor(), &file)?;
             Ok(json!({
                 "declarations": declarations.iter().map(declaration_json).collect::<Vec<_>>(),
@@ -513,11 +849,36 @@ fn dispatch_attached(
                 "target",
             )?;
             reject_active_proof(selection, "prove")?;
+            reconcile_artifact(runtime, session, project, selection, &identity.file)?;
             match engine.open_declaration(project.project(), project.actor(), identity)? {
                 OpenResult::Published(target) => {
                     runtime.invalidate_project_states(project, session, selection);
-                    let state =
-                        engine.validate_published(project.project(), project.actor(), &target)?;
+                    session.update_current_progress(
+                        "dune_build",
+                        0,
+                        Some(3),
+                        "building the Dune target before trust audit",
+                    );
+                    let state = engine.validate_published_with_progress(
+                        project.project(),
+                        project.actor(),
+                        &target,
+                        |phase, summary| {
+                            let completed = match phase {
+                                "dune_build" => 0,
+                                "pet_refresh" => 1,
+                                "trust_audit" => 2,
+                                _ => 0,
+                            };
+                            session.update_current_progress(phase, completed, Some(3), summary);
+                        },
+                    )?;
+                    if let Ok(fingerprint) = runtime
+                        .engine
+                        .artifact_fingerprint(project.project(), &target.identity().file)
+                    {
+                        project.record_artifact(target.identity().file.clone(), fingerprint);
+                    }
                     Ok(state_json(&state, None, None))
                 }
                 OpenResult::Open(opened) => begin_proof(project, selection, *opened),
@@ -530,6 +891,7 @@ fn dispatch_attached(
             let kind = declaration_kind(args.get("kind").and_then(Value::as_str))?;
             let statement = required_string(args, "statement")?;
             reject_active_proof(selection, "declare")?;
+            reconcile_artifact(runtime, session, project, selection, &file)?;
             let opened = engine.declare(
                 project.project(),
                 project.actor(),
@@ -566,8 +928,8 @@ fn dispatch_attached(
         }
         "check" => check(runtime, session, project, selection, args),
         "try" => try_fragments(runtime, session, project, selection, args),
-        "rewind" => rewind(engine, project, selection, args),
-        "query" => query(engine, project, selection, args),
+        "rewind" => rewind(runtime, session, project, selection, args),
+        "query" => query(runtime, project, selection, session, args),
         _ => Err(Error::new(ErrorKind::InvalidRequest, "unknown tool")),
     }
 }
@@ -626,10 +988,28 @@ fn check(
     selection: &mut Selection,
     args: &Value,
 ) -> Result<Value, Error> {
-    reject_unknown(args, &["attempts", "timeout_ms"])?;
+    reject_unknown(args, &["attempts", "timeout_ms", "trace", "structured"])?;
     let fragments = attempts(args)?;
     let timeout = attempt_timeout(args)?;
-    let (base_id, _) = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
+    let include_trace = optional_bool(args, "trace")?;
+    let include_structured = optional_bool(args, "structured")?;
+    let proof_target = selection
+        .checkpoints
+        .proof
+        .as_ref()
+        .map(|proof| proof.target.identity().file.clone())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "call prove first"))?;
+    let target = selection
+        .checkpoints
+        .proof
+        .as_ref()
+        .expect("proof presence checked")
+        .target
+        .clone();
+    runtime.engine.validate_target(project.project(), &target)?;
+    reconcile_artifact(runtime, session, project, selection, &proof_target)?;
+    let (base_id, base_state) =
+        ensure_current_state(runtime.engine.as_ref(), project, selection, Some(session))?;
     let target = selection
         .checkpoints
         .proof
@@ -637,20 +1017,43 @@ fn check(
         .expect("current state has a proof")
         .target
         .clone();
+    session.set_progress_target(declaration_identity_json(target.identity()));
+    let base_view = runtime.engine.goals(
+        project.project(),
+        project.actor(),
+        &target,
+        base_state,
+        GoalScope::All,
+        None,
+    )?;
+    session.update_current_progress(
+        "proof_step",
+        0,
+        Some(fragments.len() as u64),
+        "evaluating proof alternatives",
+    );
     let mut rejected = Vec::new();
     for (index, fragment) in fragments.iter().enumerate() {
+        session.update_current_progress(
+            "proof_step",
+            index as u64,
+            Some(fragments.len() as u64),
+            format!("evaluating alternative {}", index + 1),
+        );
         // A timed-out earlier alternative destroyed the PET epoch. Reacquire
         // the same selected checkpoint lazily before evaluating the next one.
-        let (_, base_state) = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
-        match runtime.engine.run(
+        let (_, base_state) =
+            ensure_current_state(runtime.engine.as_ref(), project, selection, Some(session))?;
+        match runtime.engine.run_traced(
             project.project(),
             project.actor(),
             &target,
             base_state,
             fragment,
+            include_trace,
             timeout,
         ) {
-            Ok(mut step) => {
+            Ok(rocq_engine::TracedProofStep::Success(mut step)) => {
                 let (view, goals_next_offset) = bounded_checkpoint_view(step.view);
                 step.view = view;
                 // Validate the native terminator before committing a finished
@@ -659,6 +1062,12 @@ fn check(
                 // indivisible source transaction and must reach rollback or
                 // success even if a late notification arrives.
                 let close_error = if step.finished {
+                    session.update_current_progress(
+                        "finalize",
+                        index as u64,
+                        Some(fragments.len() as u64),
+                        "validating the generated proof terminator",
+                    );
                     runtime
                         .engine
                         .close_proof(project.project(), project.actor(), &target, step.state)
@@ -673,11 +1082,22 @@ fn check(
                     return Err(close_error.unwrap());
                 }
                 commit_or_cancelled()?;
+                let checkpoint_view = if include_structured {
+                    step.view.clone()
+                } else {
+                    // Design note: the semantic view is materialized above so
+                    // this request can compute an optional diff, but a normal
+                    // checkpoint must not retain a potentially large duplicate
+                    // context when the caller did not opt in.
+                    let mut view = step.view.clone();
+                    view.structured_goals = None;
+                    view
+                };
                 let checkpoint = match selection.checkpoints.commit(
                     step.state,
                     fragment.clone(),
                     step.finished,
-                    step.view.clone(),
+                    checkpoint_view,
                     goals_next_offset,
                 ) {
                     Ok(checkpoint) => checkpoint,
@@ -700,33 +1120,81 @@ fn check(
                         goals_next_offset,
                         rejected,
                         &error,
+                        include_structured,
                     ));
                 }
                 if !step.finished {
-                    return Ok(selected_result(
+                    let mut result = selected_result(
                         index,
                         &step.view,
                         Some(checkpoint),
                         goals_next_offset,
                         rejected,
-                    ));
+                        include_structured,
+                    );
+                    if include_structured && let Some(diff) = goal_diff_json(&base_view, &step.view)
+                    {
+                        result["goal_diff"] = diff;
+                    }
+                    return Ok(result);
                 }
                 let path = selection
                     .checkpoints
                     .fragments(checkpoint)
                     .map_err(checkpoint_error)?;
-                match runtime.engine.publish(
+                session.update_current_progress(
+                    "prepare_writeback",
+                    index as u64,
+                    Some(fragments.len() as u64),
+                    "preparing atomic source publication",
+                );
+                match runtime.engine.publish_with_progress(
                     project.project(),
                     project.actor(),
                     &target,
                     &path,
                     || runtime.invalidate_project_states(project, session, selection),
+                    |phase, summary| {
+                        let completed = match phase {
+                            "prepare_writeback" => 0,
+                            "writeback" => 1,
+                            "dune_build" => 2,
+                            "pet_refresh" => 3,
+                            "trust_audit" => 4,
+                            "rollback_build" => 2,
+                            "rollback_refresh" => 3,
+                            _ => 0,
+                        };
+                        session.update_current_progress(phase, completed, Some(5), summary);
+                    },
                 ) {
                     Ok(state) => {
+                        if let Ok(fingerprint) = runtime
+                            .engine
+                            .artifact_fingerprint(project.project(), &target.identity().file)
+                        {
+                            project.record_artifact(target.identity().file.clone(), fingerprint);
+                        } else {
+                            project.forget_artifact(&target.identity().file);
+                        }
                         selection.checkpoints.clear();
-                        return Ok(selected_result(index, &state, None, None, rejected));
+                        let mut result = selected_result(
+                            index,
+                            &state,
+                            None,
+                            None,
+                            rejected,
+                            include_structured,
+                        );
+                        if include_structured
+                            && let Some(diff) = goal_diff_json(&base_view, &step.view)
+                        {
+                            result["goal_diff"] = diff;
+                        }
+                        return Ok(result);
                     }
                     Err(error) => {
+                        project.forget_artifact(&target.identity().file);
                         let checkpoint = if error.kind == ErrorKind::DeclarationChanged {
                             selection.checkpoints.clear();
                             None
@@ -740,12 +1208,13 @@ fn check(
                             goals_next_offset,
                             rejected,
                             &error,
+                            include_structured,
                         ));
                     }
                 }
             }
-            Err(error) if error.kind == ErrorKind::ProofStepFailed => {
-                rejected.push(public_error(&error));
+            Ok(rocq_engine::TracedProofStep::Failure(failure)) => {
+                rejected.push(traced_failure_json(&failure, include_structured));
             }
             Err(error) if error.kind == ErrorKind::ProofStepTimeout => {
                 rejected.push(public_error(&error));
@@ -758,11 +1227,16 @@ fn check(
         .checkpoints
         .lookup(base_id)
         .map_err(checkpoint_error)?;
+    let mut final_view = checkpoint.view.clone();
+    if include_structured {
+        final_view.structured_goals = base_view.structured_goals.clone();
+    }
     Ok(json!({
-        "state": state_json(
-            &checkpoint.view,
+        "state": state_json_with_options(
+            &final_view,
             Some(base_id),
             checkpoint.goals_next_offset,
+            include_structured,
         ),
         "rejected": rejected,
     }))
@@ -774,10 +1248,16 @@ fn selected_result(
     checkpoint: Option<CheckpointId>,
     goals_next_offset: Option<usize>,
     rejected: Vec<Value>,
+    include_structured: bool,
 ) -> Value {
     let mut result = json!({
         "selected": selected,
-        "state": state_json(state, checkpoint, goals_next_offset),
+        "state": state_json_with_options(
+            state,
+            checkpoint,
+            goals_next_offset,
+            include_structured,
+        ),
     });
     if !rejected.is_empty() {
         result["rejected"] = json!(rejected);
@@ -792,10 +1272,16 @@ fn selected_error(
     goals_next_offset: Option<usize>,
     rejected: Vec<Value>,
     error: &Error,
+    include_structured: bool,
 ) -> Value {
     let mut result = json!({
         "selected": selected,
-        "state": state_json(state, checkpoint, goals_next_offset),
+        "state": state_json_with_options(
+            state,
+            checkpoint,
+            goals_next_offset,
+            include_structured,
+        ),
         "error": public_error(error),
     });
     if !rejected.is_empty() {
@@ -811,10 +1297,29 @@ fn try_fragments(
     selection: &mut Selection,
     args: &Value,
 ) -> Result<Value, Error> {
-    reject_unknown(args, &["attempts", "timeout_ms"])?;
+    reject_unknown(args, &["attempts", "timeout_ms", "trace", "structured"])?;
     let fragments = attempts(args)?;
     let timeout = attempt_timeout(args)?;
-    let _ = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
+    let include_trace = optional_bool(args, "trace")?;
+    let include_structured = optional_bool(args, "structured")?;
+    let proof_target = selection
+        .checkpoints
+        .proof
+        .as_ref()
+        .map(|proof| proof.target.clone())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "call prove first"))?;
+    runtime
+        .engine
+        .validate_target(project.project(), &proof_target)?;
+    reconcile_artifact(
+        runtime,
+        session,
+        project,
+        selection,
+        &proof_target.identity().file,
+    )?;
+    let (_, initial_state) =
+        ensure_current_state(runtime.engine.as_ref(), project, selection, Some(session))?;
     let target = selection
         .checkpoints
         .proof
@@ -822,30 +1327,58 @@ fn try_fragments(
         .expect("current state has a proof")
         .target
         .clone();
+    session.set_progress_target(declaration_identity_json(target.identity()));
+    let base_view = runtime.engine.goals(
+        project.project(),
+        project.actor(),
+        &target,
+        initial_state,
+        GoalScope::All,
+        None,
+    )?;
     let mut output = Vec::new();
-    for fragment in fragments {
-        let (_, base_state) = ensure_current_state(runtime.engine.as_ref(), project, selection)?;
-        match runtime.engine.run(
+    session.update_current_progress(
+        "proof_step",
+        0,
+        Some(fragments.len() as u64),
+        "evaluating read-only proof alternatives",
+    );
+    let total = fragments.len() as u64;
+    for (index, fragment) in fragments.into_iter().enumerate() {
+        session.update_current_progress(
+            "proof_step",
+            index as u64,
+            Some(total),
+            format!("evaluating read-only alternative {}", index + 1),
+        );
+        let (_, base_state) =
+            ensure_current_state(runtime.engine.as_ref(), project, selection, Some(session))?;
+        match runtime.engine.run_traced(
             project.project(),
             project.actor(),
             &target,
             base_state,
             &fragment,
+            include_trace,
             timeout,
         ) {
-            Ok(step) => {
+            Ok(rocq_engine::TracedProofStep::Success(step)) => {
                 reject_cancelled()?;
-                let state = state_json(&step.view, None, None);
+                let state = state_json_with_options(&step.view, None, None, include_structured);
                 project
                     .actor()
                     .release_states(&[step.state])
                     .map_err(pet_release_error)?;
-                output.push(json!({"solved": step.finished, "state": state}));
+                let mut entry = json!({"solved": step.finished, "state": state});
+                if include_structured && let Some(diff) = goal_diff_json(&base_view, &step.view) {
+                    entry["goal_diff"] = diff;
+                }
+                output.push(entry);
             }
-            Err(error) if error.kind == ErrorKind::ProofStepFailed => {
+            Ok(rocq_engine::TracedProofStep::Failure(failure)) => {
                 output.push(json!({
                     "solved": false,
-                    "error": public_error(&error),
+                    "error": traced_failure_json(&failure, include_structured),
                 }));
             }
             Err(error) if error.kind == ErrorKind::ProofStepTimeout => {
@@ -857,12 +1390,19 @@ fn try_fragments(
             }
             Err(error) => return Err(error),
         }
+        session.update_current_progress(
+            "proof_step",
+            index as u64 + 1,
+            Some(total),
+            "proof alternative evaluated",
+        );
     }
     Ok(json!({"attempts": output}))
 }
 
 fn rewind(
-    engine: &Engine,
+    runtime: &Arc<ServerRuntime>,
+    session: &Arc<SessionCell>,
     project: &ProjectRuntime,
     selection: &mut Selection,
     args: &Value,
@@ -903,7 +1443,16 @@ fn rewind(
         .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "call prove first"))?
         .target
         .clone();
+    session.set_progress_target(declaration_identity_json(proof_target.identity()));
+    let engine = runtime.engine.as_ref();
     engine.validate_target(project.project(), &proof_target)?;
+    reconcile_artifact(
+        runtime,
+        session,
+        project,
+        selection,
+        &proof_target.identity().file,
+    )?;
     if selection
         .checkpoints
         .lookup(target)
@@ -911,7 +1460,7 @@ fn rewind(
         .pet_state
         .is_none()
     {
-        replay_checkpoint(engine, project, selection, target)?;
+        replay_checkpoint(engine, project, selection, target, Some(session))?;
     }
     commit_or_cancelled()?;
     selection
@@ -930,19 +1479,105 @@ fn rewind(
 }
 
 fn query(
-    engine: &Engine,
+    runtime: &Arc<ServerRuntime>,
     project: &ProjectRuntime,
     selection: &mut Selection,
+    session: &SessionCell,
     args: &Value,
 ) -> Result<Value, Error> {
+    let engine = runtime.engine.as_ref();
     let kind = args
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "kind is required"))?;
     match kind {
+        "locate_symbol" => {
+            reject_unknown(args, &["kind", "symbol", "limit"])?;
+            let symbol = required_string(args, "symbol")?.trim().to_owned();
+            if symbol.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::InvalidRequest,
+                    "symbol must not be empty",
+                ));
+            }
+            let limit = match args.get("limit") {
+                None => 20,
+                Some(value) => value
+                    .as_u64()
+                    .filter(|value| (1..=100).contains(value))
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidRequest,
+                            "limit must be an integer from 1 to 100",
+                        )
+                    })?,
+            };
+            session.update_current_progress(
+                "symbol_index",
+                0,
+                Some(project.project().file_count() as u64),
+                "indexing Dune-selected source candidates",
+            );
+            let candidate_files = engine.locate_symbol_candidates(
+                project.project(),
+                &symbol,
+                |completed, total, summary| {
+                    session.update_current_progress(
+                        "symbol_index",
+                        completed,
+                        Some(total),
+                        summary,
+                    );
+                },
+            )?;
+            reconcile_artifacts(runtime, session, project, selection, &candidate_files)?;
+            session.update_current_progress(
+                "symbol_resolve",
+                0,
+                Some(candidate_files.len() as u64),
+                "checking candidate declarations with PET",
+            );
+            let locations = engine.resolve_symbol_candidates(
+                project.project(),
+                project.actor(),
+                &symbol,
+                limit.saturating_add(1),
+                &candidate_files,
+                |completed, total, summary| {
+                    session.update_current_progress(
+                        "symbol_resolve",
+                        completed,
+                        Some(total),
+                        summary,
+                    );
+                },
+            )?;
+            let truncated = locations.len() > limit;
+            let locations = locations.into_iter().take(limit).collect::<Vec<_>>();
+            Ok(json!({
+                "symbol": symbol,
+                "candidates": locations.iter().map(symbol_location_json).collect::<Vec<_>>(),
+                "truncated": truncated,
+            }))
+        }
         "goals" => {
-            reject_unknown(args, &["kind", "scope", "goal_id", "offset"])?;
+            reject_unknown(
+                args,
+                &["kind", "scope", "goal_id", "offset", "diff", "structured"],
+            )?;
             let offset = query_offset(args)?;
+            let include_diff = match args.get("diff") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err(Error::new(
+                        ErrorKind::InvalidRequest,
+                        "diff must be a boolean",
+                    ));
+                }
+            };
+            let include_structured = optional_bool(args, "structured")?;
             let goal_id = args.get("goal_id").map(|value| {
                 value.as_array().ok_or_else(|| {
                     Error::new(
@@ -978,7 +1613,23 @@ fn query(
             } else {
                 goal_scope(args)?
             };
-            let (checkpoint, state) = ensure_current_state(engine, project, selection)?;
+            let proof_target = selection
+                .checkpoints
+                .proof
+                .as_ref()
+                .ok_or_else(|| Error::new(ErrorKind::InvalidRequest, "call prove first"))?
+                .target
+                .clone();
+            engine.validate_target(project.project(), &proof_target)?;
+            reconcile_artifact(
+                runtime,
+                session,
+                project,
+                selection,
+                &proof_target.identity().file,
+            )?;
+            let (checkpoint, state) =
+                ensure_current_state(engine, project, selection, Some(session))?;
             let proof = selection.checkpoints.proof.as_ref().unwrap();
             let view = engine.goals(
                 project.project(),
@@ -989,7 +1640,8 @@ fn query(
                 goal_id,
             )?;
             let page = text_result(&view.goals, offset)?;
-            let mut result = state_json(&view, Some(checkpoint), None);
+            let mut result =
+                state_json_with_options(&view, Some(checkpoint), None, include_structured);
             result
                 .as_object_mut()
                 .expect("state is an object")
@@ -1000,6 +1652,25 @@ fn query(
                 .unwrap_or_else(|| Value::String(String::new()));
             if let Some(next_offset) = page.get("next_offset") {
                 result["next_offset"] = next_offset.clone();
+            }
+            if include_diff {
+                let parent_view = selection
+                    .checkpoints
+                    .proof
+                    .as_ref()
+                    .and_then(|proof| proof.checkpoints.get(&checkpoint))
+                    .and_then(|checkpoint| checkpoint.parent)
+                    .and_then(|parent| selection.checkpoints.lookup(parent).ok())
+                    .map(|checkpoint| &checkpoint.view);
+                result["goal_diff"] = match parent_view
+                    .and_then(|before| goal_diff_json(before, &view))
+                {
+                    Some(diff) => diff,
+                    None => json!({
+                        "available": false,
+                        "reason": "the selected checkpoint has no materialized semantic parent context"
+                    }),
+                };
             }
             Ok(result)
         }
@@ -1019,6 +1690,7 @@ fn query(
                 "dependencies" => PetQuery::Dependencies(name),
                 _ => unreachable!(),
             };
+            reconcile_artifact(runtime, session, project, selection, &identity.file)?;
             // Design note: an exact match to the selected proof target may
             // use its retained state (which is the only context that can
             // represent an unpublished `declare`). Any other target must use
@@ -1032,7 +1704,7 @@ fn query(
                 .as_ref()
                 .is_some_and(|proof| proof.target.identity() == &identity)
             {
-                let (_, state) = ensure_current_state(engine, project, selection)?;
+                let (_, state) = ensure_current_state(engine, project, selection, Some(session))?;
                 let proof = selection.checkpoints.proof.as_ref().unwrap();
                 return text_result(
                     engine.query_state(
@@ -1068,13 +1740,24 @@ fn query(
             // override rather than be shadowed by an active proof.
             if let Some(at) = args.get("at") {
                 let identity = declaration_id(at, "at")?;
+                reconcile_artifact(runtime, session, project, selection, &identity.file)?;
                 return text_result(
                     engine.query_at(project.project(), project.actor(), &identity, query)?,
                     offset,
                 );
             }
             if selection.checkpoints.proof.is_some() {
-                let (_, state) = ensure_current_state(engine, project, selection)?;
+                let proof_file = selection
+                    .checkpoints
+                    .proof
+                    .as_ref()
+                    .expect("proof presence checked")
+                    .target
+                    .identity()
+                    .file
+                    .clone();
+                reconcile_artifact(runtime, session, project, selection, &proof_file)?;
+                let (_, state) = ensure_current_state(engine, project, selection, Some(session))?;
                 let proof = selection.checkpoints.proof.as_ref().unwrap();
                 return text_result(
                     engine.query_state(
@@ -1193,6 +1876,7 @@ fn ensure_current_state(
     engine: &Engine,
     project: &ProjectRuntime,
     selection: &mut Selection,
+    progress: Option<&SessionCell>,
 ) -> Result<(CheckpointId, PetStateId), Error> {
     let (checkpoint, state) = {
         let (checkpoint, value) = selection.checkpoints.current().map_err(checkpoint_error)?;
@@ -1200,7 +1884,7 @@ fn ensure_current_state(
     };
     let state = match state {
         Some(state) => state,
-        None => replay_checkpoint(engine, project, selection, checkpoint)?,
+        None => replay_checkpoint(engine, project, selection, checkpoint, progress)?,
     };
     Ok((checkpoint, state))
 }
@@ -1213,6 +1897,7 @@ fn replay_checkpoint(
     project: &ProjectRuntime,
     selection: &mut Selection,
     target: CheckpointId,
+    progress: Option<&SessionCell>,
 ) -> Result<PetStateId, Error> {
     let path = selection
         .checkpoints
@@ -1235,6 +1920,18 @@ fn replay_checkpoint(
     let Some(missing) = missing else {
         return Ok(records.last().unwrap().1.pet_state.unwrap());
     };
+    let replay_total = records.len().saturating_sub(missing) as u64;
+    if let Some(progress) = progress {
+        progress.update_current_progress(
+            "pet_replay",
+            0,
+            Some(replay_total),
+            format!(
+                "replaying checkpoint path for checkpoint {} after PET state loss or project refresh",
+                target.get()
+            ),
+        );
+    }
     let proof_target = selection
         .checkpoints
         .proof
@@ -1242,6 +1939,9 @@ fn replay_checkpoint(
         .expect("checkpoint path has a proof")
         .target
         .clone();
+    if let Some(progress) = progress {
+        progress.set_progress_target(declaration_identity_json(proof_target.identity()));
+    }
     let mut staged = Vec::<(CheckpointId, PetStateId, ProofState, Option<usize>)>::new();
     let mut state;
     let start;
@@ -1260,12 +1960,20 @@ fn replay_checkpoint(
         state = opened.state;
         let (view, goals_next_offset) = bounded_checkpoint_view(opened.view);
         staged.push((records[0].0, opened.state, view, goals_next_offset));
+        if let Some(progress) = progress {
+            progress.update_current_progress(
+                "pet_replay",
+                1,
+                Some(replay_total),
+                "replayed proof root checkpoint",
+            );
+        }
         start = 1;
     } else {
         state = records[missing - 1].1.pet_state.unwrap();
         start = missing;
     }
-    for (checkpoint_id, checkpoint) in records.iter().skip(start) {
+    for (replay_index, (checkpoint_id, checkpoint)) in records.iter().skip(start).enumerate() {
         let input = checkpoint.accepted_input.as_deref().ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidConfiguration,
@@ -1307,8 +2015,21 @@ fn replay_checkpoint(
             ));
         }
         state = step.state;
-        let (view, goals_next_offset) = bounded_checkpoint_view(step.view);
+        let retain_structured = checkpoint.view.structured_goals.is_some();
+        let (mut view, goals_next_offset) = bounded_checkpoint_view(step.view);
+        if !retain_structured {
+            view.structured_goals = None;
+        }
         staged.push((*checkpoint_id, step.state, view, goals_next_offset));
+        if let Some(progress) = progress {
+            let root_completed = u64::from(missing == 0);
+            progress.update_current_progress(
+                "pet_replay",
+                root_completed + replay_index as u64 + 1,
+                Some(replay_total),
+                format!("replayed checkpoint {}", checkpoint_id.get()),
+            );
+        }
     }
     let mut replaced = Vec::new();
     if let Some(proof) = &mut selection.checkpoints.proof {
@@ -1526,6 +2247,7 @@ mod tests {
                 given_up: vec![],
                 next_bullet: Some("Focus next goal with bullet -.".into()),
             },
+            structured_goals: None,
         };
         let value = state_json(&state, Some(CheckpointId::from_u64(3)), None);
         assert_eq!(value["status"], "Open");
@@ -1537,6 +2259,60 @@ mod tests {
             "Focus next goal with bullet -."
         );
         assert_eq!(value["focus"]["stack"][0]["right_goal_ids"][0][1], 7);
+    }
+
+    #[test]
+    fn structured_goal_payload_is_explicit_and_preserves_stack_sides() {
+        let state = ProofState {
+            theorem: DeclarationInfo {
+                identity: DeclarationIdentity {
+                    file: FileId("A.v".into()),
+                    qualified_path: vec!["Demo".into(), "t".into()],
+                },
+                kind: DeclarationKind::Theorem,
+                statement: "True".into(),
+            },
+            lifecycle: rocq_engine::ProofLifecycle::Open,
+            goals: "============================\nTrue".into(),
+            goal_focus: rocq_engine::GoalFocus::default(),
+            structured_goals: Some(rocq_engine::StructuredGoals {
+                focused: vec![rocq_engine::GoalDetail {
+                    evar: vec![json!("Ser_Evar"), json!(1)],
+                    name: None,
+                    hypotheses: vec![rocq_engine::GoalHypothesis {
+                        names: vec!["H".into()],
+                        definition: None,
+                        ty: "True".into(),
+                    }],
+                    ty: "False".into(),
+                }],
+                stack: vec![rocq_engine::GoalStackDetail {
+                    left: vec![],
+                    right: vec![rocq_engine::GoalDetail {
+                        evar: vec![json!("Ser_Evar"), json!(2)],
+                        name: Some("side".into()),
+                        hypotheses: vec![],
+                        ty: "True".into(),
+                    }],
+                }],
+                unfocused: vec![],
+                shelved: vec![],
+                given_up: vec![],
+                next_bullet: Some("-".into()),
+            }),
+        };
+        assert!(
+            state_json(&state, Some(CheckpointId::from_u64(1)), None)
+                .get("structured_goals")
+                .is_none()
+        );
+        let value = state_json_with_options(&state, Some(CheckpointId::from_u64(1)), None, true);
+        assert_eq!(value["structured_goals"]["focused"][0]["type"], "False");
+        assert_eq!(
+            value["structured_goals"]["stack"][0]["right"][0]["name"],
+            "side"
+        );
+        assert_eq!(value["structured_goals"]["focused"][0]["id"][1], 1);
     }
 
     #[test]
@@ -1553,6 +2329,7 @@ mod tests {
             lifecycle: rocq_engine::ProofLifecycle::Open,
             goals: format!("{}🦀tail", "a".repeat(QUERY_PAGE_BYTES - 1)),
             goal_focus: rocq_engine::GoalFocus::default(),
+            structured_goals: None,
         };
         let hypothetical = state_json(&state, None, None);
         assert_eq!(hypothetical["goals_truncated"], true);

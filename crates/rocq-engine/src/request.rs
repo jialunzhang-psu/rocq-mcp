@@ -1,4 +1,4 @@
-//! Request-scoped cancellation visible to the synchronous PET transport.
+//! Request-scoped cancellation shared by synchronous Dune and PET work.
 
 use std::{
     cell::RefCell,
@@ -11,6 +11,7 @@ use std::{
 const ACTIVE: u8 = 0;
 const CANCELLED: u8 = 1;
 const COMMITTED: u8 = 2;
+const TIMED_OUT: u8 = 3;
 
 /// One admitted MCP request's cancellation signal.
 ///
@@ -20,11 +21,11 @@ const COMMITTED: u8 = 2;
 /// before returning a cancellation error, after which MCP invalidates opaque
 /// state IDs and retains the replayable checkpoint graph.
 #[derive(Clone, Default)]
-pub struct PetRequestCancellation {
+pub struct RequestCancellation {
     state: Arc<AtomicU8>,
 }
 
-impl PetRequestCancellation {
+impl RequestCancellation {
     pub fn new() -> Self {
         Self::default()
     }
@@ -39,9 +40,22 @@ impl PetRequestCancellation {
             .compare_exchange(ACTIVE, CANCELLED, Ordering::AcqRel, Ordering::Acquire);
     }
 
+    /// Mark a request's operator deadline as expired.  It shares the same
+    /// transport interruption path as cancellation but remains distinguishable
+    /// at the MCP boundary for a stable timeout error.
+    pub fn timeout(&self) {
+        let _ = self
+            .state
+            .compare_exchange(ACTIVE, TIMED_OUT, Ordering::AcqRel, Ordering::Acquire);
+    }
+
     /// Return whether cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
-        self.state.load(Ordering::Acquire) == CANCELLED
+        matches!(self.state.load(Ordering::Acquire), CANCELLED | TIMED_OUT)
+    }
+
+    pub fn is_timed_out(&self) -> bool {
+        self.state.load(Ordering::Acquire) == TIMED_OUT
     }
 
     /// Atomically establish the operation's irreversible commit point.
@@ -54,17 +68,17 @@ impl PetRequestCancellation {
             .compare_exchange(ACTIVE, COMMITTED, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) | Err(COMMITTED) => true,
-            Err(CANCELLED) => false,
+            Err(CANCELLED | TIMED_OUT) => false,
             Err(_) => unreachable!("request cancellation state is invalid"),
         }
     }
 }
 
 thread_local! {
-    static CURRENT: RefCell<Option<PetRequestCancellation>> = const { RefCell::new(None) };
+    static CURRENT: RefCell<Option<RequestCancellation>> = const { RefCell::new(None) };
 }
 
-struct Restore(Option<PetRequestCancellation>);
+struct Restore(Option<RequestCancellation>);
 
 impl Drop for Restore {
     fn drop(&mut self) {
@@ -78,7 +92,7 @@ impl Drop for Restore {
 /// Run one synchronous engine operation under its MCP cancellation signal.
 /// Nested scopes restore the previous signal even if the operation unwinds.
 pub fn with_request_cancellation<T>(
-    cancellation: &PetRequestCancellation,
+    cancellation: &RequestCancellation,
     operation: impl FnOnce() -> T,
 ) -> T {
     let previous = CURRENT.with(|current| current.replace(Some(cancellation.clone())));
@@ -92,7 +106,17 @@ pub fn request_cancelled() -> bool {
         current
             .borrow()
             .as_ref()
-            .is_some_and(PetRequestCancellation::is_cancelled)
+            .is_some_and(RequestCancellation::is_cancelled)
+    })
+}
+
+/// Whether the active request was interrupted by its operator deadline.
+pub fn request_timed_out() -> bool {
+    CURRENT.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .is_some_and(RequestCancellation::is_timed_out)
     })
 }
 
@@ -105,13 +129,13 @@ pub fn commit_request() -> bool {
         current
             .borrow()
             .as_ref()
-            .is_none_or(PetRequestCancellation::commit)
+            .is_none_or(RequestCancellation::commit)
     })
 }
 
 /// Whether the current thread has an MCP request scope. Without one, direct
 /// engine callers retain the ordinary blocking transport behavior.
-pub(super) fn request_scope_active() -> bool {
+pub(crate) fn request_scope_active() -> bool {
     CURRENT.with(|current| current.borrow().is_some())
 }
 
@@ -121,12 +145,12 @@ mod tests {
 
     #[test]
     fn cancellation_and_commit_have_one_atomic_winner() {
-        let cancelled = PetRequestCancellation::new();
+        let cancelled = RequestCancellation::new();
         cancelled.cancel();
         assert!(cancelled.is_cancelled());
         assert!(!cancelled.commit());
 
-        let committed = PetRequestCancellation::new();
+        let committed = RequestCancellation::new();
         assert!(committed.commit());
         committed.cancel();
         assert!(!committed.is_cancelled());

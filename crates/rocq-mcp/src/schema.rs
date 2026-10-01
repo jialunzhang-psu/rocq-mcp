@@ -51,7 +51,7 @@ pub fn tool_definitions() -> &'static [Tool] {
         // the wire schema flat and enforce kind-specific fields in dispatch.
         let query_schema = schema(
             json!({
-                "kind": {"enum": ["goals", "search", "about", "print", "assumptions", "dependencies", "type", "notations"]},
+                "kind": {"enum": ["goals", "search", "about", "print", "assumptions", "dependencies", "type", "notations", "locate_symbol", "progress"]},
                 "target": declaration_id,
                 "at": declaration_id,
                 "expression": s,
@@ -59,6 +59,11 @@ pub fn tool_definitions() -> &'static [Tool] {
                 "scope": {"enum": ["focused", "unfocused", "shelved", "given_up", "all"]},
                 "goal_id": {"type":"array", "minItems":1},
                 "offset": {"type":"integer","minimum":0},
+                "symbol": s,
+                "limit": {"type":"integer","minimum":1,"maximum":100},
+                "generation": {"type":"integer","minimum":0},
+                "diff": {"type":"boolean"},
+                "structured": {"type":"boolean","description":"Include structured local contexts in a goals response."},
             }),
             &["kind"],
         );
@@ -99,7 +104,9 @@ pub fn tool_definitions() -> &'static [Tool] {
                 schema(
                     json!({
                         "attempts":{"type":"array","items":s,"minItems":1,"maxItems":20},
-                        "timeout_ms":timeout_ms.clone()
+                        "timeout_ms":timeout_ms.clone(),
+                        "trace":{"type":"boolean","description":"Include a bounded sentence trace for rejected fragments."},
+                        "structured":{"type":"boolean","description":"Include structured goal contexts and semantic goal diffs."}
                     }),
                     &["attempts"],
                 ),
@@ -109,7 +116,9 @@ pub fn tool_definitions() -> &'static [Tool] {
                 schema(
                     json!({
                         "attempts":{"type":"array","items":s,"minItems":1,"maxItems":20},
-                        "timeout_ms":timeout_ms
+                        "timeout_ms":timeout_ms,
+                        "trace":{"type":"boolean","description":"Include a bounded sentence trace for rejected fragments."},
+                        "structured":{"type":"boolean","description":"Include structured goal contexts and semantic goal diffs."}
                     }),
                     &["attempts"],
                 ),

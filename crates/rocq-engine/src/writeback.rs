@@ -60,11 +60,24 @@ pub(crate) fn prepare(
 /// Commit one prepared publication after MCP invalidates the project epoch.
 /// Any failure after replacement performs a CAS-safe restoration, rebuilds the
 /// source that actually won the race, and refreshes PET before returning.
+#[cfg(test)]
 pub(crate) fn publish<T>(
     project: &DuneProject,
     actor: &PetActor,
     prepared: PreparedPublication,
     timeout: Option<Duration>,
+    validate: impl FnOnce(&DuneProject, &PetActor) -> Result<T>,
+) -> Result<T> {
+    let mut progress = |_: &'static str, _: &str| {};
+    publish_with_progress(project, actor, prepared, timeout, &mut progress, validate)
+}
+
+pub(crate) fn publish_with_progress<T>(
+    project: &DuneProject,
+    actor: &PetActor,
+    prepared: PreparedPublication,
+    timeout: Option<Duration>,
+    progress: &mut dyn FnMut(&'static str, &str),
     validate: impl FnOnce(&DuneProject, &PetActor) -> Result<T>,
 ) -> Result<T> {
     let PreparedPublication {
@@ -75,6 +88,7 @@ pub(crate) fn publish<T>(
         replacement_digest,
     } = prepared;
     let original_digest = digest(&original);
+    progress("writeback", "checking source ownership before atomic write");
     let current = fs::read(&path);
     if current
         .as_ref()
@@ -90,6 +104,7 @@ pub(crate) fn publish<T>(
             &original,
             replacement_digest,
             timeout,
+            progress,
         )?;
         return Err(Error::new(
             ErrorKind::DeclarationChanged,
@@ -105,15 +120,19 @@ pub(crate) fn publish<T>(
             &original,
             replacement_digest,
             timeout,
+            progress,
         )?;
         return Err(error);
     }
 
     let result = (|| {
+        progress("dune_build", "building the published Dune target");
         native_build(project, &path, timeout)?;
         require_digest(&path, replacement_digest)?;
+        progress("pet_refresh", "refreshing PET after native build");
         actor.refresh_workspace(&workspace).map_err(refresh_error)?;
         require_digest(&path, replacement_digest)?;
+        progress("trust_audit", "auditing the completed declaration");
         let value = validate(project, actor)?;
         require_digest(&path, replacement_digest)?;
         Ok(value)
@@ -121,6 +140,10 @@ pub(crate) fn publish<T>(
     match result {
         Ok(value) => Ok(value),
         Err(error) => {
+            progress(
+                "rollback_build",
+                "restoring and rebuilding the previous source",
+            );
             let restored = restore_epoch(
                 project,
                 actor,
@@ -129,6 +152,7 @@ pub(crate) fn publish<T>(
                 &original,
                 replacement_digest,
                 timeout,
+                progress,
             )?;
             if restored {
                 Err(error)
@@ -144,6 +168,10 @@ pub(crate) fn publish<T>(
 
 /// Restore the original bytes only when our exact replacement still owns the
 /// source. The resulting source is built and admitted as a fresh PET epoch.
+// Design note: rollback receives the original transaction tuple plus the
+// progress sink explicitly so it cannot accidentally consult mutable global
+// publication state while repairing a failed CAS/build.
+#[allow(clippy::too_many_arguments)]
 fn restore_epoch(
     project: &DuneProject,
     actor: &PetActor,
@@ -152,6 +180,7 @@ fn restore_epoch(
     original: &[u8],
     replacement_digest: [u8; 32],
     timeout: Option<Duration>,
+    progress: &mut dyn FnMut(&'static str, &str),
 ) -> Result<bool> {
     let current = fs::read(path);
     let restored = match current {
@@ -163,12 +192,14 @@ fn restore_epoch(
         // external winner. Never recreate or overwrite it during rollback.
         Ok(_) | Err(_) => false,
     };
+    progress("rollback_build", "building the source selected by rollback");
     let build = native_build(project, path, timeout).map_err(|error| {
         Error::new(
             ErrorKind::InvalidConfiguration,
             format!("publication rollback build failed: {error}"),
         )
     });
+    progress("rollback_refresh", "refreshing PET after rollback build");
     let refresh = actor.refresh_workspace(workspace).map_err(|error| {
         Error::new(
             ErrorKind::InvalidConfiguration,
@@ -259,6 +290,12 @@ pub(crate) fn native_build(
         None,
     )
     .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "failed to execute Dune"))?;
+    if output.cancelled {
+        return Err(Error::new(
+            ErrorKind::RequestCancelled,
+            "native build was cancelled",
+        ));
+    }
     if output.timed_out {
         return Err(Error::new(
             ErrorKind::BuildTimeout,
@@ -291,15 +328,21 @@ pub(crate) fn build_and_refresh<T>(
     actor: &PetActor,
     source: &Path,
     timeout: Option<Duration>,
+    progress: &mut dyn FnMut(&'static str, &str),
     validate: impl FnOnce(&DuneProject, &PetActor) -> Result<T>,
 ) -> Result<T> {
     let workspace = project.pet_workspace(source)?;
+    progress("dune_build", "building the selected Dune target");
     let build = native_build(project, source, timeout);
+    progress("pet_refresh", "refreshing PET after native build");
     let refresh = actor.refresh_workspace(&workspace).map_err(refresh_error);
     match (build, refresh) {
         (_, Err(error)) => Err(error),
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Ok(())) => validate(project, actor),
+        (Ok(()), Ok(())) => {
+            progress("trust_audit", "auditing the completed declaration");
+            validate(project, actor)
+        }
     }
 }
 
@@ -402,6 +445,9 @@ mod tests {
         let engine = Engine::new(EngineConfig::default()).unwrap();
         let project = engine.attach(directory.path()).unwrap();
         let actor = PetActor::new();
+        engine
+            .reconcile_source(&project, &FileId("A.v".into()))
+            .unwrap();
         let identity = DeclarationIdentity {
             file: FileId("A.v".into()),
             qualified_path: vec!["Demo".into(), "A".into(), "t".into()],
@@ -483,6 +529,10 @@ mod tests {
         assert!(fixture.actor.goals(fixture.root_state).is_err());
 
         fs::write(&fixture.dune_file, "(rocq.theory (name Demo))\n").unwrap();
+        fixture
+            .engine
+            .reconcile_source(&fixture.project, &FileId("A.v".into()))
+            .unwrap();
         let declarations = fixture
             .engine
             .list_decls(&fixture.project, &fixture.actor, &FileId("A.v".into()))

@@ -17,6 +17,21 @@ pub struct EngineConfig {
     pub command_timeout: Option<Duration>,
 }
 
+/// Content identity of one Dune consumer compilation unit.
+///
+/// The source digest is included because a source edit can leave the old
+/// artifact in place until the next build.  The artifact digest covers the
+/// compiler's `.vo` and `.glob` outputs, so a reverse dependency rebuild (or a
+/// changed declaration index) is an epoch boundary even when the source file
+/// itself did not change.  `None` represents a missing output and is
+/// intentionally retained rather than treated as an empty file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactFingerprint {
+    pub source: [u8; 32],
+    pub vo: Option<[u8; 32]>,
+    pub glob: Option<[u8; 32]>,
+}
+
 /// Stable error classes projected one-for-one by the MCP adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
@@ -38,6 +53,8 @@ pub enum ErrorKind {
     PetLost,
     /// PET rejected a semantic query after validating the request shape.
     QueryFailed,
+    /// A bounded read-only query exceeded the server's operator deadline.
+    QueryTimeout,
     /// PET reported an internal/system failure that is not a project
     /// configuration error and did not necessarily lose the transport.
     PetFailure,
@@ -56,6 +73,12 @@ pub struct Error {
     /// only for an operation whose Rocq command has a precise location; all
     /// ordinary validation errors keep it absent.
     pub diagnostic: Option<ProofDiagnostic>,
+    /// Optional structured remediation metadata.  The value is intentionally
+    /// opaque at the engine boundary: PET owns the semantic classification and
+    /// the MCP adapter owns the public JSON shape.  Keeping it optional makes
+    /// every existing error wire-compatible while allowing declaration
+    /// diagnostics to carry symbol candidates/import hints.
+    pub resolution: Option<Value>,
     /// Whether `message` is Rocq's semantic diagnostic rather than a
     /// wrapper/infrastructure explanation.  MCP must preserve this text
     /// verbatim instead of appending generic recovery prose.
@@ -71,6 +94,7 @@ impl Error {
             kind,
             message: message.into(),
             diagnostic: None,
+            resolution: None,
             semantic: false,
         }
     }
@@ -78,6 +102,14 @@ impl Error {
     /// Attach PET's half-open UTF-8 byte range for the rejected fragment.
     pub fn with_diagnostic(mut self, diagnostic: ProofDiagnostic) -> Self {
         self.diagnostic = Some(diagnostic);
+        self
+    }
+
+    /// Attach bounded, structured remediation data without changing the
+    /// authoritative semantic message.  Callers must keep the value small;
+    /// MCP applies a second transport bound before exposing it.
+    pub fn with_resolution(mut self, resolution: Value) -> Self {
+        self.resolution = Some(resolution);
         self
     }
 
@@ -231,6 +263,54 @@ pub struct GoalFocus {
     pub next_bullet: Option<String>,
 }
 
+/// One local binding in a structured Rocq goal.  `ty` and `definition` are
+/// PET pretty-printings, but their field boundaries are semantic: clients do
+/// not need to parse the rendered goal block to inspect a context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalHypothesis {
+    pub names: Vec<String>,
+    pub definition: Option<String>,
+    pub ty: String,
+}
+
+/// One goal with its PET evar identity and complete local context.  The evar
+/// is useful only inside one PET epoch; consumers must not persist it as a
+/// durable identity across replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalDetail {
+    pub evar: Vec<Value>,
+    pub name: Option<String>,
+    pub hypotheses: Vec<GoalHypothesis>,
+    pub ty: String,
+}
+
+/// One proof-focus stack frame.  Keeping left and right sides separate is
+/// necessary to reconstruct bullet/focus transitions; `unfocused` below is a
+/// convenience flattening, not the source of truth for stack structure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalStackDetail {
+    pub left: Vec<GoalDetail>,
+    pub right: Vec<GoalDetail>,
+}
+
+/// Structured goal collections returned alongside the historical rendered
+/// text.  Stack sides remain separate so bullet/focus semantics are preserved.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StructuredGoals {
+    pub focused: Vec<GoalDetail>,
+    pub stack: Vec<GoalStackDetail>,
+    pub unfocused: Vec<GoalDetail>,
+    pub shelved: Vec<GoalDetail>,
+    pub given_up: Vec<GoalDetail>,
+    pub next_bullet: Option<String>,
+}
+
+impl StructuredGoals {
+    pub fn total_count(&self) -> usize {
+        self.focused.len() + self.unfocused.len() + self.shelved.len() + self.given_up.len()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GoalScope {
     Focused,
@@ -269,6 +349,23 @@ pub struct ProofState {
     /// PET-owned focus/identity metadata. Full goal contexts are deliberately
     /// not copied into every checkpoint; query(goals) asks PET for them again.
     pub goal_focus: GoalFocus,
+    /// Optional full structured goal data.  Checkpoint roots keep this absent
+    /// to avoid duplicating large contexts; explicit goal queries and traced
+    /// failures opt in to materialization.
+    pub structured_goals: Option<StructuredGoals>,
+}
+
+/// A project-wide declaration candidate returned by symbol location.  The
+/// `require_import` string is derived from Dune's logical compilation unit,
+/// never guessed from a physical path or source text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SymbolLocation {
+    pub identity: DeclarationIdentity,
+    pub qualified_name: String,
+    pub kind: DeclarationKind,
+    pub statement: String,
+    pub require_import: String,
+    pub match_kind: String,
 }
 
 /// PET-provided byte range in the exact source snapshot. The end is exclusive.
@@ -335,6 +432,35 @@ pub struct ProofStep {
     pub state: PetStateId,
     pub view: ProofState,
     pub finished: bool,
+}
+
+/// One bounded sentence trace item produced by Rocq's parser during a
+/// speculative fragment.  Indices are zero-based; ranges are half-open UTF-8
+/// bytes in the exact submitted fragment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofTraceStep {
+    pub sentence_index: usize,
+    pub byte_range: ProofDiagnostic,
+    pub command: String,
+}
+
+/// Rich semantic failure for a sentence-aware speculative fragment.  The
+/// pre-failure state is a materialized read-only view; its temporary PET state
+/// identifier has already been released before this value crosses the engine
+/// boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofFailure {
+    pub error: Error,
+    pub sentence_index: usize,
+    pub sentence_range: ProofDiagnostic,
+    pub before: ProofState,
+    pub trace: Vec<ProofTraceStep>,
+}
+
+#[derive(Clone, Debug)]
+pub enum TracedProofStep {
+    Success(ProofStep),
+    Failure(ProofFailure),
 }
 
 /// Direct PET query command. These variants are formatting requests, not a

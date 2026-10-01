@@ -235,6 +235,8 @@ Required capabilities include:
 - authoritative workspace refresh after source/build mutation;
 - the PET queries used by the MCP query variants and trust audit;
 - fragment-relative Rocq exception ranges for precise atomic-run diagnostics.
+- parser-aware speculative execution that returns the failing sentence and an
+  exported pre-failure state without committing the accepted prefix.
 
 If stock PET lacks one of these capabilities, it is added to the pinned PET
 submodule. Rust fallback scanners or alternative semantic implementations are
@@ -260,6 +262,23 @@ project-wide PET epoch transition:
 5. call PET's `petanque/refresh_workspace` operation;
 6. when applicable, audit the written declaration in the refreshed process;
 7. resume queued operations, lazily replaying their checkpoints.
+
+Read-only consumers use the same rule without treating Rust as a dependency
+resolver. Before PET opens a declaration/query document, MCP asks Dune to
+build that exact source unit's consumer `.vo`. The target comes only from the
+rule's structured `(targets (files ...))` field; dependency `.vo` tokens are
+never eligible. MCP fingerprints the source plus resulting `.vo`/`.glob`,
+builds every candidate first, and performs at most one project-wide PET
+restart/invalidation if a fingerprint changed. Asking Dune on every consumer
+admission is intentional: the consumer's own fingerprint cannot reveal that a
+transitive dependency source is newer. This is what prevents Rocq's
+`makes inconsistent assumptions` failure without `dune clean` or manual epoch
+replacement.
+
+PET opens Dune's build-context `.v` copy and receives only the compiled
+project load paths. The source-tree counterpart remains useful for public file
+identity and writeback, but passing it as a recursive compiled load path would
+make Rocq derive names such as `Prefix._build.default.Unit`.
 
 `refresh_workspace` is a PET-owned semantic operation, not a Rust cache guess.
 It must atomically:
@@ -559,6 +578,8 @@ It owns no proof topology. Its responsibilities include:
 - returning all declarations in that document in one request;
 - opening an exact declaration and returning its state/source metadata;
 - executing a complete fragment atomically from a supplied state;
+- executing a parser-aware traced fragment whose failure payload identifies
+  sentence boundaries and a temporary pre-failure goal state;
 - lossless structured goals (including stack frames, bullet suggestion, shelf,
   given-up goals, and PET evar identities) plus direct Rocq `Search`, `About`, `Print`, type, notation,
   dependency, and assumption queries;
@@ -719,6 +740,12 @@ fragment atomically. The first accepted candidate wins.
   has already destroyed all old exported state IDs;
 - rejected and unevaluated candidates do not alter checkpoint topology.
 
+The traced PET endpoint still preserves this atomicity: a semantic rejection
+may export one temporary state immediately before the failing parser sentence,
+but MCP reads its goals and releases that ID before returning. Optional trace
+and structured-goal fields are observations only and never become replay
+commands or a second checkpoint graph.
+
 Publication-error behavior remains the public behavior documented in
 `COMMANDS.md`; no `Pending` or `SourceClosed` backend state is introduced.
 
@@ -749,6 +776,18 @@ target remains queryable. For `search`, `type`, and
 `notations`, an explicit `at` always selects its source context even while a
 proof is active; otherwise use the active proof and reject if neither context
 exists. `search` is Rocq `Search`, not a wrapper metadata search.
+
+`locate_symbol` is the only project-wide declaration lookup. A compiler `.glob`
+pass selects candidate files; a missing or stale `.glob` falls back to an
+identifier-bounded source-presence hint so it cannot create a false negative.
+Neither path constructs a declaration. After candidate consumer targets are
+built and any epoch change is coordinated once, PET supplies every canonical
+identity, kind, statement, and range. MCP ranks exact/suffix/leaf matches and
+derives `Require Import` suggestions from Dune logical libraries. `progress`
+reads a per-connection generation record from an independent mutex so it can
+be polled while publication or replay holds the normal
+admission/project/selection locks. Progress is never pushed as an MCP
+notification.
 
 The MCP boundary, not the engine, bounds materialized text to 32 KiB UTF-8
 pages. Continuation is one integer byte offset returned by the preceding page;

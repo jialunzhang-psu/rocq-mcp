@@ -51,7 +51,15 @@ impl Layout {
                 .collect::<Vec<_>>();
             for (path, build_target, source_load_paths) in paths {
                 for mapping in &source_load_paths {
-                    if !load_paths.contains(mapping) {
+                    // A project `-R . Prefix` action is evaluated from Dune's
+                    // build context.  The corresponding source-tree mapping
+                    // is useful for selecting the logical unit above, but
+                    // passing it to PET would make Coq search `_build` through
+                    // the source root and expect names such as
+                    // `Prefix._build.default.A`.  Keep compiled project
+                    // mappings and external libraries; omit only the
+                    // source-tree counterpart.
+                    if pet_load_path_allowed(&root, mapping) && !load_paths.contains(mapping) {
                         load_paths.push(mapping.clone());
                     }
                 }
@@ -193,6 +201,24 @@ impl Layout {
     }
 }
 
+fn pet_load_path_allowed(root: &Path, mapping: &PetLoadPath) -> bool {
+    if !mapping.physical.starts_with(root) {
+        return true;
+    }
+    let build_root = match std::env::var_os("DUNE_BUILD_DIR") {
+        Some(value) => {
+            let value = PathBuf::from(value);
+            if value.is_absolute() {
+                value
+            } else {
+                root.join(value)
+            }
+        }
+        None => root.join("_build"),
+    };
+    mapping.physical.starts_with(build_root)
+}
+
 /// Asks Dune for workspace metadata. The runner owns contention and process
 /// deadlines; this adapter maps its native outcome to layout error classes.
 fn dune_describe(
@@ -208,6 +234,12 @@ fn dune_describe(
         build_dir,
     )
     .map_err(|_| Error::new(ErrorKind::InvalidConfiguration, "Dune is unavailable"))?;
+    if output.cancelled {
+        return Err(Error::new(
+            ErrorKind::RequestCancelled,
+            "Dune description was cancelled",
+        ));
+    }
     if output.timed_out {
         return Err(Error::new(
             ErrorKind::ProjectTimeout,
@@ -352,13 +384,16 @@ fn dune_sources(requested: &Path, timeout: Option<Duration>) -> Result<DuneSourc
                 .windows(2)
                 .any(|pair| pair[0].ends_with("rocq") && pair[1] == "compile")
         {
-            let target = rule
-                .iter()
-                .find(|token| token.ends_with(".vo") && Path::new(token).starts_with(&build_root))
-                .ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidConfiguration, "Rocq rule lacks target")
-                })?;
-            let build_target = Path::new(target)
+            // The dependency list also contains other `.vo` files.  Read the
+            // `(targets ( ... (files (...) ...)))` subtree instead of relying
+            // on token order: Dune is free to reorder dependencies and the
+            // first/last `.vo` heuristic can silently assign a source to a
+            // reverse dependency's artifact.
+            let target = rule_target_vo(rule, &build_root).ok_or_else(|| {
+                Error::new(ErrorKind::InvalidConfiguration, "Rocq rule lacks target")
+            })?;
+            let build_target = target
+                .as_path()
                 .strip_prefix(&build_root)
                 .map_err(|_| {
                     Error::new(
@@ -426,9 +461,60 @@ fn dune_sources(requested: &Path, timeout: Option<Duration>) -> Result<DuneSourc
     Ok((workspace, sources, mappings))
 }
 
+/// Return the `.vo` explicitly listed by one Dune rule's `targets` form.
+///
+/// Dune's S-expression schema has remained stable enough for the surrounding
+/// adapter to consume, but action/dependency contents are intentionally
+/// untyped.  This helper therefore only trusts the structurally delimited
+/// `targets/files` list and never scans the rule-wide token stream.
+fn rule_target_vo(rule: &[String], build_root: &Path) -> Option<PathBuf> {
+    let targets = rule.iter().position(|token| token == "targets")?;
+    let targets_start = targets + 1;
+    let targets_end = balanced_end(rule, targets_start)?;
+    let files = (targets_start..targets_end).find(|&index| rule[index] == "files")?;
+    let files_start = files + 1;
+    let files_end = balanced_end(rule, files_start)?;
+    rule[files_start..files_end]
+        .iter()
+        .filter(|token| token.ends_with(".vo"))
+        .filter_map(|token| {
+            let path = Path::new(token);
+            if path.is_absolute() {
+                path.starts_with(build_root).then(|| path.to_owned())
+            } else {
+                // Older Dune versions print paths relative to the build
+                // context.  Normalize them to the same absolute form used by
+                // `dune_workspace` before returning the target.
+                Some(build_root.join(path))
+            }
+        })
+        .next()
+}
+
+/// Find the exclusive closing parenthesis for a list beginning at `start`.
+fn balanced_end(tokens: &[String], start: usize) -> Option<usize> {
+    (tokens.get(start)? == "(").then_some(())?;
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token.as_str() {
+            "(" => depth = depth.checked_add(1)?,
+            ")" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Decode exactly the `-R`/`-Q` mappings in one Dune Rocq compile action.
-/// Isolated metadata-build paths are translated to Dune's reported real build
-/// context; an existing source-tree counterpart is added for document identity.
+/// Isolated metadata-build paths are translated to both the real Dune build
+/// context and an existing source-tree counterpart. The latter is retained for
+/// layout identity only; [`Layout::load`] excludes it from PET's compiled
+/// library search path.
 fn dune_load_paths(
     rule: &[String],
     action_dir: &Path,
@@ -472,6 +558,29 @@ fn dune_load_paths(
                         "Dune source load-path directory is unavailable",
                     )
                 })?;
+                // Dune compiles from its build-context copy. Retain the real
+                // compiled root for PET and also return the source counterpart
+                // below so layout discovery can assign a canonical file ID.
+                let build_root = match std::env::var_os("DUNE_BUILD_DIR") {
+                    Some(value) => {
+                        let value = PathBuf::from(value);
+                        if value.is_absolute() {
+                            value
+                        } else {
+                            workspace.join(value)
+                        }
+                    }
+                    None => workspace.join("_build"),
+                };
+                let compiled = build_root.join("default").join(relative);
+                let compiled_mapping = PetLoadPath {
+                    physical: compiled,
+                    logical: logical.clone(),
+                    implicit,
+                };
+                if !output.contains(&compiled_mapping) {
+                    output.push(compiled_mapping);
+                }
                 let mapping = PetLoadPath {
                     physical: source,
                     logical: logical.clone(),
@@ -576,4 +685,69 @@ fn sexp_tokens(source: &str) -> Result<Vec<String>> {
         out.push(token);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(value: &str) -> Vec<String> {
+        sexp_tokens(value).expect("valid test S-expression")
+    }
+
+    #[test]
+    fn target_mapping_ignores_dependency_vo_files() {
+        let rule = tokens(
+            "((deps ((File (In_build_dir /build/Other.vo)) (File (In_build_dir /build/Source.v)))) (targets ((files (/build/Source.glob /build/Source.vo)) (directories ()))) (action (run rocq compile Source.v)))",
+        );
+        assert_eq!(
+            rule_target_vo(&rule, Path::new("/build")),
+            Some(PathBuf::from("/build/Source.vo"))
+        );
+    }
+
+    #[test]
+    fn target_mapping_accepts_relative_build_context_paths() {
+        let rule = tokens(
+            "((deps ((File (In_build_dir Other.vo)))) (targets ((files (Source.vo Source.glob)) (directories ()))) (action (run rocq compile Source.v)))",
+        );
+        assert_eq!(
+            rule_target_vo(&rule, Path::new("/build/default")),
+            Some(PathBuf::from("/build/default/Source.vo"))
+        );
+    }
+
+    #[test]
+    fn pet_uses_compiled_project_mapping_not_source_root() {
+        let logical = LogicalLibrary(vec!["Demo".into()]);
+        let source = PetLoadPath {
+            physical: PathBuf::from("/project"),
+            logical: logical.clone(),
+            implicit: true,
+        };
+        let build_root = match std::env::var_os("DUNE_BUILD_DIR") {
+            Some(value) => {
+                let value = PathBuf::from(value);
+                if value.is_absolute() {
+                    value
+                } else {
+                    Path::new("/project").join(value)
+                }
+            }
+            None => PathBuf::from("/project/_build"),
+        };
+        let compiled = PetLoadPath {
+            physical: build_root.join("default"),
+            logical: logical.clone(),
+            implicit: true,
+        };
+        let external = PetLoadPath {
+            physical: PathBuf::from("/opt/rocq/lib"),
+            logical,
+            implicit: true,
+        };
+        assert!(!pet_load_path_allowed(Path::new("/project"), &source));
+        assert!(pet_load_path_allowed(Path::new("/project"), &compiled));
+        assert!(pet_load_path_allowed(Path::new("/project"), &external));
+    }
 }
