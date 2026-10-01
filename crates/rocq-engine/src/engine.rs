@@ -266,8 +266,9 @@ impl Engine {
         })
     }
 
-    /// Re-query Dune and atomically replace the cached typed view when its
-    /// selected files, libraries, targets, or PET load paths changed.
+    /// Probe layout inputs and, only when they changed, re-query Dune and
+    /// atomically replace the cached typed view when its selected files,
+    /// libraries, targets, or PET load paths changed.
     ///
     /// Returns `true` exactly when the caller must begin a new PET epoch and
     /// invalidate all exported state IDs for this project. A workspace-root

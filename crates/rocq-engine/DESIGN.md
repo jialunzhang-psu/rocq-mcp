@@ -7,8 +7,8 @@ unimplemented compatibility path.
 
 The public MCP tools and their schemas remain those documented in
 `crates/rocq-mcp/COMMANDS.md`. This redesign removes duplicated backend
-machinery; it does not expose PET state IDs, trace cursors, publication
-transactions, or process-management operations to MCP clients.
+machinery; it does not expose PET checkpoint state handles, trace cursors,
+publication transactions, or process-management operations to MCP clients.
 
 ## 1. Goals
 
@@ -32,9 +32,10 @@ interface. In particular:
 - there is no proof repository;
 - there is no wrapper-side Rocq parser or source walker;
 - there is no pool of disposable or per-file PET processes;
-- there is one live PET process per active Dune project, retained across
-  non-mutating calls and refreshed at project mutation boundaries (with
-  process replacement only as the fail-closed refresh fallback);
+- there is at most one PET process per attached Dune project, started lazily on
+  the first PET-backed call, retained across non-mutating calls, and refreshed
+  at project mutation boundaries (with process replacement only as the
+  fail-closed refresh fallback);
 - PET state IDs are private, ephemeral handles for one live PET process;
 - the only proof history retained by the wrapper is the request-boundary data
   required by `rewind` and writeback.
@@ -148,14 +149,15 @@ same `ProjectId` share the same PET process. Different projects use different
 PET processes and may execute concurrently.
 
 The typed Dune view is a cache, not a second project authority. Under the
-project operation barrier, every admitted MCP operation re-queries Dune for
-the selected files, logical libraries, native targets, and PET load paths. If
-that typed view changed, the runtime installs it atomically, replaces the PET
-epoch, and clears every session's state IDs before continuing. Calling
-`start` again re-queries and installs a fresh Dune view inside the already
-shared runtime's barrier by the same rule. A failed Dune query fails the
-request without falling back to the previous view, filesystem configuration
-scanning, or conventional directory names.
+project operation barrier, every admitted MCP operation first computes a cheap
+filesystem layout probe over Dune configuration files and the selected source
+set. Only when that probe changes does the runtime re-query Dune for selected
+files, logical libraries, native targets, and PET load paths. If that typed view
+changed, the runtime installs it atomically, replaces the PET epoch, and clears
+every session's state IDs before continuing. Initial `start` discovery and a
+later `start` reattachment use the same barrier and probe rule. A failed Dune
+query fails the request without falling back to the previous view, filesystem
+configuration scanning, or conventional directory names.
 
 The PET process is started lazily on the first PET-backed operation. A project
 with no attached connections and no operation in flight is removed and its
@@ -208,9 +210,11 @@ not an ambiguous retry: MCP retains checkpoint topology and accepted text,
 clears every project state ID, and the next safe request lazily replays. An
 atomic request state orders cancellation against the first irreversible wrapper
 mutation: if cancellation wins, no checkpoint/source transition occurs; if the
-commit point wins, a late notification cannot interrupt publication or its
-rollback. Native Dune subprocesses are observed at transaction boundaries and
-are not asynchronously killed.
+commit point wins, a late request-cancellation notification cannot interrupt
+publication or its rollback. Before that point, an in-flight Dune subprocess is
+terminated with its process group when cancellation or an active command/query
+deadline wins. An explicit native command deadline can still terminate a build
+after publication has committed and drive the normal rollback/error path.
 
 `check` and `try` additionally accept an optional positive `timeout_ms`. It is
 applied separately to each atomic fragment. Expiry has the same epoch effect as
@@ -251,8 +255,9 @@ edited document is insufficient: other loaded documents may depend on its old
 compiled environment.
 
 Therefore every source publication, and every server-initiated Dune build that
-may replace Rocq build artifacts while PET is already live, is an exclusive,
-project-wide PET epoch transition:
+actually changes a compiled environment while PET is already live, is an
+exclusive, project-wide PET epoch transition. A clean/no-op build does not
+needlessly replace the epoch. For a source publication, the transition is:
 
 1. pause new operations for that project's PET actor;
 2. wait for the current PET operation to finish;
@@ -269,9 +274,11 @@ build that exact source unit's consumer `.vo`. The target comes only from the
 rule's structured `(targets (files ...))` field; dependency `.vo` tokens are
 never eligible. MCP fingerprints the source plus resulting `.vo`/`.glob`,
 builds every candidate first, and performs at most one project-wide PET
-restart/invalidation if a fingerprint changed. Asking Dune on every consumer
-admission is intentional: the consumer's own fingerprint cannot reveal that a
-transitive dependency source is newer. This is what prevents Rocq's
+restart/invalidation when an existing artifact/cache fingerprint changes. A
+first build of a previously absent artifact does not invalidate a live proof
+that could not have loaded it. Asking Dune on every consumer admission is
+intentional: the consumer's own fingerprint cannot reveal that a transitive
+dependency source is newer. This is what prevents Rocq's
 `makes inconsistent assumptions` failure without `dune clean` or manual epoch
 replacement.
 
@@ -929,10 +936,13 @@ The redesign is complete only when all of the following hold.
   `CachedReplay`, or `DisposablePet`.
 - There is no wrapper source walker, scope stack, or declaration catalogue.
 - One project runtime owns exactly one PET child process.
-- No MCP response contains a PET state ID.
+- No MCP response contains an exported PET checkpoint/state handle; the
+  documented epoch-scoped goal IDs are observational and are not releaseable
+  PET state handles.
 - No hard-coded build/source directory names determine project behavior.
-- Every admitted operation uses a current Dune-reported view; a changed view
-  invalidates the old PET epoch before any retained state is consumed.
+- Every admitted project operation checks a current filesystem layout probe; a
+  changed probe installs a fresh Dune-reported view and invalidates the old PET
+  epoch before any retained state is consumed.
 
 ### PET protocol
 

@@ -32,16 +32,18 @@ build as one server-owned operation; `mcp-manager` only invokes that hook.
 
 The HTTP endpoint is `/mcp` and accepts loopback addresses only. The server has
 no authentication. Use trusted clients and projects; proof publication edits
-project source files. Each active Dune project owns one long-lived PET child;
-connections attached to the same project share it. `ROCQ_PET_BIN` selects the
-PET executable once when the engine starts; when it
+project source files. Each attached Dune project has at most one shared PET
+child; it is started lazily on the first PET-backed operation, and connections
+attached to the same project share it. `ROCQ_PET_BIN` selects the PET
+executable once when the engine starts; when it
 is unset, the engine resolves `pet` through `PATH`. The build script installs
 to `target/pet` by default (override with `ROCQ_PET_PREFIX`) and emits a
 launcher that binds PET to the matching coq-lsp plugin tree. It never depends
 on Dune's private `_build` path. Dune commands have no default correctness
 deadline; operators may set `ROCQ_COMMAND_TIMEOUT_SECS` explicitly.
-Read-only `query` calls have a 240-second watchdog so an abandoned project
-refresh or prover query cannot outlive its client indefinitely; override it
+Semantic `query` calls have a 240-second watchdog so an abandoned project
+refresh or prover query cannot outlive its client indefinitely; the lightweight
+`query(kind:"progress")` poll is exempt. Override the semantic-query deadline
 with a positive `ROCQ_QUERY_TIMEOUT_SECS` value.
 
 The ten tools and their JSON results are specified in
@@ -51,6 +53,9 @@ traces and pre-failure goal snapshots; project symbol lookup, structured
 goals/diffs, and publication/PET replay status are exposed through documented
 `query` variants. Progress is strictly client-polled with
 `query(kind:"progress")`; the server does not emit progress notifications.
+For `start`, pass an absolute path to the project on the MCP server when using
+HTTP/Funnel. Relative paths work only when the client supplies an explicit
+working directory or a single local MCP workspace root.
 
 ## Test
 

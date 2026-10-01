@@ -800,9 +800,10 @@ impl ServerHandler for RocqServer {
     }
 }
 
-/// Validate and serve the lock-free progress query.  `generation` is an
+/// Validate and serve the read-only progress snapshot. `generation` is an
 /// optional caller-observed value used only to compute `changed`; polling is
-/// stateless and never blocks waiting for a transition.
+/// stateless and never waits for a project/admission/PET transition (it only
+/// takes the short progress-record mutex).
 fn progress_query(session: &SessionCell, args: &Value) -> Result<Value, Error> {
     let object = args.as_object().ok_or_else(|| {
         Error::new(

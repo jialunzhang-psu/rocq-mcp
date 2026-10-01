@@ -141,6 +141,19 @@ mod tests {
     }
 
     #[test]
+    fn start_handbook_does_not_promise_remote_relative_paths() {
+        let start = tool_definitions()
+            .iter()
+            .find(|tool| tool.name == "start")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("start tool description exists");
+        assert!(start.contains("/absolute/path/to/project"));
+        assert!(start.contains("HTTP/Funnel"));
+        assert!(start.contains("cheap layout probe"));
+        assert!(!start.contains("\"./project\""));
+    }
+
+    #[test]
     fn logical_identity_projection_never_contains_physical_paths() {
         let identity = DeclarationIdentity {
             file: FileId("Main.v".into()),

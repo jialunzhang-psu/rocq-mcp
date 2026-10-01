@@ -3,8 +3,11 @@
 Examples below use the compact command notation
 `{"tool":"<name>","args":{...}}`; on the MCP wire this is a
 `tools/call` request whose `params` are `{"name":"<name>","arguments":{...}}`.
-The server exposes ten tools. There are no public cursors, session IDs, or publication commands. Files
-are workspace-relative `FileId` values; declarations are PET-backed
+The server exposes ten tools. The tool API exposes no query cursors or
+connection identifiers, and no separate publication command. Streamable HTTP
+may still carry its transport-level `Mcp-Session-Id`; open proof responses may
+contain the documented session-local checkpoints and epoch-scoped goal IDs.
+Files are workspace-relative `FileId` values; declarations are PET-backed
 `DeclarationId` objects. A declaration listing has an id, kind, and statement;
 the qualified name is already encoded by the id. Proof status is supplied by
 PET-backed proof operations. A proof state has the exact reusable `target`
@@ -26,11 +29,14 @@ as an MCP notification.
 
 Errors are JSON objects of the form
 `{"kind":"invalid_request","message":"call start first"}`. The `message` gives
-the specific field, declaration, or Rocq diagnostic. Every tool after `start`
-first refreshes the typed Dune view and can therefore return
-`project_timeout` or `invalid_configuration`; tables below describe the
-operation-specific cases and repeat those common errors where useful. `check`
-and `try` can also return errors *inside* their result, preserving
+the specific field, declaration, or Rocq diagnostic. `query(kind:"progress")` is
+the exception: it is connection-local, does not require `start`, and bypasses
+the project/PET operation locks. After `start`, each other project operation
+checks a cheap filesystem layout probe under the project barrier; only a probe
+change causes a fresh typed Dune discovery. Operations that do invoke Dune can
+therefore return `project_timeout` or `invalid_configuration`; tables below
+describe the operation-specific cases and repeat those common errors where
+useful. `check` and `try` can also return errors *inside* their result, preserving
 ordered-alternative diagnostics without turning a rejected proof fragment into
 a protocol failure. When Rocq attaches a precise location to a rejected proof
 fragment, the error also carries
@@ -63,10 +69,12 @@ commit point terminates that PET process epoch. The server then reaps it,
 releases the serialized operation, retains the proof/checkpoint text, and
 lazily replays on the next safe request. Such a cancellation never advances a
 checkpoint or writes source. A notification racing after the explicit commit
-point is too late: publication/rollback runs to a consistent boundary. An
-already-running Dune subprocess likewise runs to its transaction boundary; it
-is not asynchronously killed. If a cancelled response is still observed, its
-kind is `request_cancelled`; normally the cancelling client discards it.
+point is too late: publication/rollback runs to a consistent boundary. Before
+that point, an in-flight Dune subprocess is terminated with its process group
+when request cancellation or an active command/query deadline wins. An explicit
+native command deadline can still drive normal rollback/error handling after
+publication has committed. If a cancelled response is still observed, its kind
+is `request_cancelled`; normally the cancelling client discards it.
 
 ## `start`
 
@@ -74,12 +82,14 @@ kind is `request_cancelled`; normally the cancelling client discards it.
 {"tool":"start","args":{"project_path":"/absolute/path/to/project"}}
 ```
 
-Returns `{}`. It only attaches the Dune workspace and does not
-start a workspace-wide PET declaration index. Call `list_files`, then
-`list_decls(file)` to discover a target. Every call obtains a fresh typed Dune
-view under the shared project barrier. Reattaching the same workspace retires
-this connection's selected proof; if Dune's view changed, all connections keep
-their checkpoint text but discard the old PET state handles for lazy replay.
+Returns `{}`. It attaches the Dune workspace and does not start a
+workspace-wide PET declaration index. Call `list_files`, then
+`list_decls(file)` to discover a target. Initial attachment performs Dune
+discovery; later calls use the shared project barrier and a cheap layout probe,
+rerunning Dune discovery only when that probe changes. Reattaching the same
+workspace retires this connection's selected proof; if Dune's view changed, all
+connections keep their checkpoint text but discard the old PET state handles
+for lazy replay.
 If PET was already lost while retiring this connection's proof, its old IDs no
 longer exist: retirement succeeds, sibling sessions discard their stale IDs,
 and the attachment is installed normally.
@@ -107,8 +117,10 @@ the client context is unknown.
 {"tool":"list_files","args":{}}
 ```
 
-Returns Dune's selected source files as workspace-relative `FileId` values.
-This operation re-queries Dune, but does not invoke PET or parse source files.
+Returns the current Dune-selected source files as workspace-relative `FileId`
+values. It checks the cheap layout probe and refreshes Dune's typed view only if
+the project layout inputs changed; it does not invoke PET or parse source
+files.
 
 ## `list_decls`
 
@@ -151,9 +163,10 @@ to select candidate documents, then asks PET for canonical declaration
 metadata only in those documents. `limit` (1–100, default 20) bounds the
 result. It returns the complete declaration id, qualified name, declaration
 kind/statement, Dune-derived module, a suggested `Require Import`, and the
-match class (`exact`, `suffix`, or `leaf`). `progress` is a lock-free polling
-query; it accepts only an optional previously observed `generation` and never
-waits for or pushes a state transition.
+match class (`exact`, `suffix`, or `leaf`). `progress` is a read-only polling
+query; it accepts only an optional previously observed `generation`, takes only
+a short progress-record lock, and never waits for project/admission/PET locks
+or pushes a state transition.
 For `goals`, `structured:true` adds local hypotheses, goal types, stack-frame
 sides, the bullet suggestion, and epoch-scoped ids where the selected state is
 retained. `diff:true` adds a semantic before/after goal diff when a parent
@@ -241,12 +254,14 @@ hypothetical `try` states. With `diff:true`, `goal_diff` reports semantic
 context/type matches, additions, removals, counts, and whether duplicate goals
 made matching ambiguous; PET evar numbers are never used as durable identity.
 
-`kind:"progress"` returns the most recent operation for this MCP connection:
-`generation`, `status` (`idle`, `running`, `completed`, `failed`, or
-`cancelled`), `phase`, `completed`, optional `total`, `elapsed_ms`, target, and
-a bounded `log_summary`. A completed/failed record is retained until the next
-operation, so polling cannot miss a fast build. Supplying the last generation
-sets `changed:false` when no newer record exists and `changed:true` otherwise.
+`kind:"progress"` returns the most recent operation for this MCP connection.
+Before any operation it returns the idle `generation`/`status` snapshot; when a
+record exists it includes `status` (`running`, `completed`, `failed`, or
+`cancelled`), `phase`, `completed`, `elapsed_ms`, `changed`, and optional
+`total`, `target`, and bounded `log_summary`. A terminal record is retained
+until the next operation, so polling cannot miss a fast build. Supplying the
+last generation sets `changed:false` when no newer record exists and
+`changed:true` otherwise.
 The query is intentionally independent of the connection admission, project,
 selection, and PET locks, so it can be issued while a build or PET replay is
 running. No progress notification is emitted.
@@ -286,9 +301,9 @@ environment, the semantic error keeps PET's message and adds
 `resolution:{kind:"missing_identifier",identifier,candidates,suggested_imports}`.
 Its diagnostic byte range is translated from the synthetic header to the exact
 statement-relative range, and each candidate includes its full id and a
-Dune-derived `Require Import` suggestion. An empty candidate list means the
-symbol is not present in the selected project, not that source text was
-searched unsuccessfully.
+Dune-derived `Require Import` suggestion. An empty candidate list means that
+the bounded project index found no canonical declaration candidate; it does not
+by itself prove that the identifier is absent from source text.
 
 | Error kind | When |
 |---|---|
