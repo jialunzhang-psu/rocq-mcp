@@ -139,6 +139,18 @@ fn official_stdio_transport_serves_initialize_and_tools_list() {
     let initialize: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(initialize["id"], 1);
     assert_eq!(initialize["result"]["serverInfo"]["name"], "rocq-mcp");
+    assert!(
+        initialize["result"]["instructions"]
+            .as_str()
+            .is_some_and(|instructions| instructions.contains("`list_decls` → `prove`")),
+        "{initialize}"
+    );
+    assert!(
+        initialize["result"]["instructions"]
+            .as_str()
+            .is_some_and(|instructions| instructions.contains("no separate save or publish tool")),
+        "{initialize}"
+    );
     assert_eq!(
         initialize["result"]["capabilities"]["experimental"]["codex/sandbox-state-meta"],
         serde_json::json!({})

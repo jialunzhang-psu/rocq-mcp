@@ -5,16 +5,28 @@ use serde_json::{Value, json};
 
 const COMMANDS: &str = include_str!("../COMMANDS.md");
 
-/// Return one tool's complete handbook section as its MCP description.
-/// A missing section is a packaging error and fails catalog initialization.
-fn tool_description(name: &str) -> &'static str {
-    let heading = format!("## `{name}`\n");
+/// Return one complete level-two handbook section. Inputs are heading text
+/// without Markdown markers; a missing section is a packaging error. The
+/// returned slice is embedded in MCP discovery and has no runtime side effects.
+fn handbook_section(heading: &str) -> &'static str {
+    let heading = format!("## {heading}\n");
     let start = COMMANDS
         .find(&heading)
-        .unwrap_or_else(|| panic!("missing COMMANDS.md section for {name}"))
+        .unwrap_or_else(|| panic!("missing COMMANDS.md section for {heading}"))
         + heading.len();
     let tail = &COMMANDS[start..];
     tail[..tail.find("\n## ").unwrap_or(tail.len())].trim()
+}
+
+/// Return one tool's complete handbook section as its MCP description.
+fn tool_description(name: &str) -> &'static str {
+    handbook_section(&format!("`{name}`"))
+}
+
+/// Advertise the canonical proof lifecycle even when a client defers or
+/// semantically filters individual tools from its initial user interface.
+pub(crate) fn server_instructions() -> &'static str {
+    handbook_section("Proof-editing workflow")
 }
 
 /// Build a closed object schema with the given properties and required fields.

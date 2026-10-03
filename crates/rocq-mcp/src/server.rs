@@ -3,7 +3,7 @@
 use crate::{
     adapter::{dispatch, public_error},
     checkpoint::CheckpointBook,
-    schema::tool_definitions,
+    schema::{server_instructions, tool_definitions},
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -651,6 +651,7 @@ impl ServerHandler for RocqServer {
         ServerConfig::new(capabilities)
             .with_protocol_version(ProtocolVersion::V_2025_11_25)
             .with_server_info(Implementation::new("rocq-mcp", env!("CARGO_PKG_VERSION")))
+            .with_instructions(server_instructions())
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {

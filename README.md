@@ -8,6 +8,37 @@ An MCP server for interactive Rocq proofs. The workspace has three crates:
 | `rocq-mcp` | MCP transport and JSON adapter built on `rmcp` |
 | `rocq-e2e` | External MCP trace runner |
 
+## MCP proof workflow
+
+The authoritative catalog contains ten tools: `start`, `list_files`,
+`list_decls`, `query`, `declare`, `prove`, `abandon`, `check`, `try`, and
+`rewind`. To edit an existing unfinished declaration, use:
+
+```text
+start -> list_files -> list_decls -> prove -> try/check/query/rewind
+```
+
+`prove` enters and selects the exact declaration returned by `list_decls`.
+`try` only evaluates hypothetical fragments and requires that selection;
+`invalid_request: call prove first` means no proof is active on that MCP
+connection. `check` commits an accepted fragment and, when it closes the proof,
+performs atomic source writeback, the Dune build, PET refresh, and the trust
+audit. There is no separate save command and no Desktop or shell/file tool is
+needed. For a new declaration, use `declare` instead of `prove`.
+
+Read-only `query` operations—including expression type checking and
+`assumptions`—do not enter or modify a proof. An assumptions result containing
+`Axioms:` means the target depends on the listed declarations; neither a
+successful type query nor `Completed` means axiom-free. `Completed` permits
+explicit in-project `Axiom` dependencies under the documented trust policy.
+
+The server returns all ten entries from uncursored MCP `tools/list`. If a
+client tool picker or semantic tool search displays only a subset, refresh or
+reconnect that connector and inspect `tools/list`; do not treat the filtered or
+stale client catalog as the server's capability set. The complete wire
+contract and lifecycle details are in
+[`COMMANDS.md`](crates/rocq-mcp/COMMANDS.md).
+
 ## Run
 
 Requires Rust, Rocq, opam, and Dune. The tested versions are Rust 1.97, Rocq

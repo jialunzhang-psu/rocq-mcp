@@ -3,7 +3,8 @@
 Examples below use the compact command notation
 `{"tool":"<name>","args":{...}}`; on the MCP wire this is a
 `tools/call` request whose `params` are `{"name":"<name>","arguments":{...}}`.
-The server exposes ten tools. The tool API exposes no query cursors or
+The server exposes the ten tools listed in the proof-editing workflow below.
+The tool API exposes no query cursors or
 connection identifiers, and no separate publication command. Streamable HTTP
 may still carry its transport-level `Mcp-Session-Id`; open proof responses may
 contain the documented session-local checkpoints and epoch-scoped goal IDs.
@@ -20,6 +21,11 @@ the target as a string or repeat its source statement.
 successfully builds the source, and PET's structured global-context report
 passes the wrapper's trust policy. The wrapper never infers completion from
 source text or parses human-readable Rocq output to classify dependencies.
+`Completed` does **not** mean axiom-free: the trust policy permits explicit
+`Axiom` declarations inside the selected Dune project. Use
+`query(kind:"assumptions")`; an `Axioms:` list means the target still depends
+on every listed declaration, while Rocq's closed-under-the-global-context
+message is the axiom-free result.
 
 Structured goal contexts, sentence traces, and publication/replay progress are
 opt-in observations. They are returned only when the corresponding request
@@ -76,7 +82,39 @@ native command deadline can still drive normal rollback/error handling after
 publication has committed. If a cancelled response is still observed, its kind
 is `request_cancelled`; normally the cancelling client discards it.
 
+## Proof-editing workflow
+
+The server's uncursored `tools/list` returns exactly `start`, `list_files`,
+`list_decls`, `query`, `declare`, `prove`, `abandon`, `check`, `try`, and
+`rewind`.
+
+The complete existing-declaration workflow is `start` → `list_files` →
+`list_decls` → `prove` → (`query(kind:"goals")` / `try` / `check` /
+`rewind`). Call `prove` with the exact declaration id from `list_decls` before
+calling `try` or `check`. For a new declaration, call `declare` instead of
+`prove` to create the selected in-memory proof.
+
+`try` is read-only speculation: it never enters a proof, commits a command,
+writes a file, or closes a theorem. `check` submits and commits the first
+accepted fragment. When that fragment closes the selected proof, `check`
+atomically writes the source, runs the Dune build, refreshes PET, and performs
+the trust audit; there is no separate save or publish tool. A successful
+`query(kind:"type")` or `query(kind:"assumptions")` is inspection only and
+does not select a proof. Desktop or shell/file-writing tools are not required
+for Rocq-owned publication.
+
+`invalid_request: call prove first` from `try`, `check`, `rewind`, or a goals
+query means this MCP connection has no active proof selected by `prove` or
+`declare`; it does not mean that the `prove` tool is absent. The uncursored
+`tools/list` result is authoritative. If a client-side tool picker or tool
+search exposes only a subset, reconnect or refresh that MCP connector and
+inspect `tools/list` rather than reporting the filtered catalog as a server
+limitation.
+
 ## `start`
+
+Attach one Dune project. This operation does not select or enter a proof; use
+`prove` for an existing declaration or `declare` for a new one afterward.
 
 ```json
 {"tool":"start","args":{"project_path":"/absolute/path/to/project"}}
@@ -147,6 +185,9 @@ each returned ID, and the qualified name is not duplicated as a second string.
 
 ## `query`
 
+Inspect goals, declarations, expressions, symbols, assumptions, or operation
+progress. A query never enters, commits, saves, or publishes a proof.
+
 The query variant is `args.kind`; there is no `request` wrapper.
 `goals` accepts optional `scope`, `goal_id`, and `offset` fields. `scope` is
 `focused` (the default), `unfocused`, `shelved`, `given_up`, or `all`;
@@ -195,6 +236,15 @@ directly through PET; they are not wrapper metadata projections. `print`
 returns Rocq's printed term, not the original tactic script. PET hint-level
 loader progress (for example, fetching opaque proofs from a `.vo` file) is
 not query output; Rocq's notice, warning, and error messages remain intact.
+`assumptions` has the semantics of Rocq `Print Assumptions`. If its text
+contains `Axioms:` followed by names, the target's logical dependency closure
+contains those assumptions. Type checking, a successful Dune build, or a
+`Completed` proof state does not erase or contradict that list. The publication
+trust policy accepts only explicit in-project `Axiom` dependencies; it rejects
+unfinished (`Admitted`) project dependencies, out-of-project axioms, other
+kernel assumption kinds, and unsafe theory flags. Consequently, `Completed`
+means “built and accepted by this policy,” not “closed under the global
+context.”
 `goals` returns a
 proof state with PET-owned observability: `goals` is always present for an
 open state (possibly `""`), `goal_counts` reports focused/unfocused/shelved/
@@ -283,6 +333,10 @@ running. No progress notification is emitted.
 
 ## `declare`
 
+Begin and select a new in-memory theorem, lemma, or definition proof. The
+declaration becomes durable only when a later `check` closes it and completes
+atomic writeback; there is no separate save operation.
+
 ```json
 {"tool":"declare","args":{"name":"new_t","statement":"True","kind":"Theorem","file":"Main.v"}}
 ```
@@ -317,6 +371,11 @@ by itself prove that the identifier is absent from source text.
 | `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 
 ## `prove`
+
+Open, enter, and select an existing proof declaration for interactive editing.
+This is the required entry operation before `try`, `check`, `rewind`, or a
+selected `query(kind:"goals")`; pass the exact target returned by
+`list_decls`.
 
 ```json
 {"tool":"prove","args":{"target":{"file":"Main.v","qualified_path":["Demo","t"]}}}
@@ -367,6 +426,11 @@ invalidates stale IDs held by sibling sessions.
 | `invalid_configuration` | The project or in-memory proof state is unavailable. |
 
 ## `check`
+
+Submit and commit proof commands to the active proof selected by `prove` or
+`declare`. If the committed fragment closes the proof, this same call saves it
+by atomic source writeback, Dune build, PET refresh, and trust audit; there is
+no separate save or publish call.
 
 ```json
 {"tool":"check","args":{"attempts":["intro n. reflexivity.","intros; auto."]}}
@@ -443,6 +507,10 @@ after completion. The server does not push progress notifications.
 
 ## `try`
 
+Speculatively test proof commands against the active proof selected by `prove`
+or `declare`. This read-only tool requires that prior selection and never
+commits or saves its result; use `check` to submit a successful fragment.
+
 ```json
 {"tool":"try","args":{"attempts":["intro n. reflexivity.","auto."]}}
 {"tool":"try","args":{"attempts":["eauto.","firstorder."],"timeout_ms":5000}}
@@ -482,6 +550,9 @@ no notifications are sent.
 | `pet_failure` | PET reported an anomaly, system failure, or unknown remote error. |
 
 ## `rewind`
+
+Move an active proof selected by `prove` or `declare` to an earlier committed
+`check` boundary. It does not open a proof or write source.
 
 ```json
 {"tool":"rewind","args":{}}

@@ -141,6 +141,30 @@ mod tests {
     }
 
     #[test]
+    fn discovery_documents_entry_commit_and_persistence() {
+        let description = |name: &str| {
+            tool_definitions()
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.description.as_deref())
+                .unwrap()
+        };
+        assert!(description("prove").starts_with("Open, enter, and select"));
+        assert!(description("prove").contains("before `try`, `check`"));
+        assert!(description("try").starts_with("Speculatively test"));
+        assert!(description("try").contains("never\ncommits or saves"));
+        assert!(description("check").starts_with("Submit and commit"));
+        assert!(description("check").contains("no separate save or publish call"));
+        assert!(description("query").contains("A query never enters, commits, saves"));
+
+        let instructions = crate::schema::server_instructions();
+        assert!(instructions.contains("`list_decls` → `prove`"));
+        assert!(instructions.contains("`invalid_request: call prove first`"));
+        assert!(instructions.contains("uncursored `tools/list` returns exactly"));
+        assert!(instructions.contains("`tools/list` result is authoritative"));
+    }
+
+    #[test]
     fn start_handbook_does_not_promise_remote_relative_paths() {
         let start = tool_definitions()
             .iter()
